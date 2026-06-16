@@ -1,0 +1,10 @@
+ultralytics
+cvzone
+opencv-python
+python-telegram-bot
+requests
+cryptography
+python-dotenv
+filelock
+paho-mqtt
+pytest

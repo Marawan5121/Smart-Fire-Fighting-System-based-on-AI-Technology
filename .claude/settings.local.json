@@ -1,0 +1,19 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(grep -v -E \"\\\\.\\(jpg|jpeg|png|mp4|avi|pt|onnx|rar|zip\\)$\")",
+      "Read(//d/d/Graduation Project/cv/Real-Time-Smoke-Fire-Detection-YOLO11/src/**)",
+      "Read(//d/d/Graduation Project/cv/Real-Time-Smoke-Fire-Detection-YOLO11/models/**)",
+      "Bash(sed -E 's/=\\(.{4}\\).*/=\\\\1.../' .env)",
+      "Read(//d/d/Graduation Project/cv/Real-Time-Smoke-Fire-Detection-YOLO11/**)",
+      "Bash(python -m py_compile src/fire_detector.py src/mqtt_client.py src/main_integrated.py src/notification_service.py)",
+      "Bash(cd \"/d/Graduation Project/cv\" && find . -iname \"*implementation_plan*\" -o -iname \"*walkthrough*\" -o -iname \"*architecture_review*\" -o -iname \"*power_budget*\" -o -iname \"*sffs*\" 2>/dev/null | grep -v node_modules; echo \"---ROOT---\"; ls -la; echo \"---CLAUDE DIR---\"; ls -la .claude 2>/dev/null)",
+      "Bash(python -m py_compile main_integrated.py)",
+      "Bash(pio --version)",
+      "PowerShell($ErrorActionPreference='SilentlyContinue'; \\(Get-Command pio\\).Source; python -m platformio --version 2>&1 | Select-Object -First 1; pio --version 2>&1 | Select-Object -First 1)",
+      "Bash(python -m py_compile main_integrated.py decision_engine.py mqtt_client.py fire_detector.py notification_service.py)",
+      "Bash(python -m py_compile notification_service.py config.py main_integrated.py)",
+      "Bash(python -m py_compile notification_service.py config.py main_integrated.py decision_engine.py mqtt_client.py fire_detector.py)"
+    ]
+  }
+}

@@ -1,0 +1,297 @@
+#include "actuators.h"
+#include "config.h"
+
+ActuatorController::ActuatorController()
+    : _gasValveOpen(true), _doorOpen(false), _buzzerActive(false),
+      _pump1Active(false), _pump2Active(false), _pump3Active(false),
+      _buzzerMode(BUZZER_MODE_OFF), _buzzerLastToggle(0), _buzzerPinState(false) {}
+
+void ActuatorController::begin(int buzzerPin,
+                                int pump1Pin, int pump2Pin, int pump3Pin,
+                                int ledGreenPin, int ledOrangePin, int ledRedPin) {
+    _buzzerPin    = buzzerPin;
+    _pump1Pin     = pump1Pin;
+    _pump2Pin     = pump2Pin;
+    _pump3Pin     = pump3Pin;
+    _ledGreenPin  = ledGreenPin;
+    _ledOrangePin = ledOrangePin;
+    _ledRedPin    = ledRedPin;
+
+    // ---- PCA9685 PWM servo driver (shared hardware I2C bus) ----
+    // Defensive: re-begin the bus here so the PCA9685 is guaranteed an initialised
+    // Wire BEFORE _pwm.begin(), regardless of call order in setup(). Bind the driver
+    // explicitly to Wire and follow the exact Adafruit init sequence.
+    Wire.begin(I2C_SDA, I2C_SCL);
+    Wire.setClock(400000);                            // 400 kHz fast-mode I2C
+    _pwm = Adafruit_PWMServoDriver(PCA9685_I2C_ADDR, Wire);
+    _pwm.begin();
+    _pwm.setOscillatorFrequency(PCA9685_OSC_FREQ);    // 27 MHz internal osc (Adafruit calibration)
+    _pwm.setPWMFreq(SERVO_PWM_FREQ);                  // 50 Hz analog-servo refresh
+    delay(10);                                        // let the prescaler/oscillator settle
+
+    // Configure buzzer pin
+    pinMode(_buzzerPin, OUTPUT);
+    digitalWrite(_buzzerPin, LOW);
+
+    // Configure pump relay pins (Active LOW: HIGH = OFF)
+    pinMode(_pump1Pin, OUTPUT);
+    digitalWrite(_pump1Pin, HIGH);  // Pump 1 OFF at boot
+    pinMode(_pump2Pin, OUTPUT);
+    digitalWrite(_pump2Pin, HIGH);  // Pump 2 OFF at boot
+
+    // Pump 3 (GPIO 13) is a standard suppression pump (like Pumps 1 & 2): OFF at
+    // boot, ON only in EMERGENCY, and protected by the dry-run cutoff.
+    pinMode(_pump3Pin, OUTPUT);
+    digitalWrite(_pump3Pin, HIGH);  // Pump 3 OFF at boot
+
+    // Configure status LED pins. Green is COMMON-ANODE (inverted): HIGH = OFF.
+    pinMode(_ledGreenPin, OUTPUT);
+    digitalWrite(_ledGreenPin, HIGH);   // green OFF at boot (inverted)
+    pinMode(_ledOrangePin, OUTPUT);
+    digitalWrite(_ledOrangePin, LOW);
+    pinMode(_ledRedPin, OUTPUT);
+    digitalWrite(_ledRedPin, LOW);
+
+    // Set safe defaults at boot (positions all 5 servos; leaves Pump 3 ON).
+    setAllSafe();
+
+    Serial.println("[Actuators] Initialized: PCA9685@0x" + String(PCA9685_I2C_ADDR, HEX) +
+                   " servos ch0-4" +
+                   " | Buzzer=GPIO" + String(_buzzerPin) +
+                   " Pump1=GPIO" + String(_pump1Pin) +
+                   " Pump2=GPIO" + String(_pump2Pin) +
+                   " Pump3=GPIO" + String(_pump3Pin) +
+                   " | LEDs=GPIO" + String(_ledGreenPin) + "/" +
+                   String(_ledOrangePin) + "/" + String(_ledRedPin));
+}
+
+// ==========================================
+// PCA9685 servo helper — map degrees → 12-bit pulse count
+// ==========================================
+void ActuatorController::setServoAngle(uint8_t channel, int angle) {
+    angle = constrain(angle, 0, 180);
+    uint16_t count = map(angle, 0, 180, SERVO_PWM_MIN, SERVO_PWM_MAX);
+    _pwm.setPWM(channel, 0, count);
+}
+
+// ==========================================
+// Gas Valve Servo (PCA9685 ch 0)
+// ==========================================
+
+void ActuatorController::openGasValve() {
+    setServoAngle(SERVO_GAS_VALVE_CH, SERVO_GAS_VALVE_OPEN);
+    _gasValveOpen = true;
+}
+
+void ActuatorController::closeGasValve() {
+    setServoAngle(SERVO_GAS_VALVE_CH, SERVO_GAS_VALVE_CLOSED);
+    _gasValveOpen = false;
+}
+
+void ActuatorController::setGasValve(const String& command) {
+    if (command == "OPEN") {
+        openGasValve();
+    } else if (command == "CLOSE") {
+        closeGasValve();
+    }
+}
+
+// ==========================================
+// Door / Window Servo (PCA9685 ch 1)
+// ==========================================
+
+void ActuatorController::openDoors() {
+    setServoAngle(SERVO_DOORS_CH, SERVO_DOOR_OPEN);
+    _doorOpen = true;
+}
+
+void ActuatorController::closeDoors() {
+    setServoAngle(SERVO_DOORS_CH, SERVO_DOOR_CLOSED);
+    _doorOpen = false;
+}
+
+void ActuatorController::setDoors(const String& command) {
+    if (command == "OPEN") {
+        openDoors();
+    } else if (command == "CLOSE") {
+        closeDoors();
+    }
+}
+
+// ==========================================
+// Buzzer (non-blocking pattern engine)
+// ==========================================
+
+void ActuatorController::buzzerOn()  { setBuzzerMode(BUZZER_MODE_CONTINUOUS); }
+void ActuatorController::buzzerOff() { setBuzzerMode(BUZZER_MODE_OFF); }
+
+void ActuatorController::setBuzzerMode(BuzzerMode mode) {
+    _buzzerMode = mode;
+    _buzzerActive = (mode != BUZZER_MODE_OFF);
+
+    // Apply the immediate, steady-state pin level. INTERMITTENT then toggles
+    // itself forward in updateBuzzer(); CONTINUOUS/OFF need no further ticking.
+    switch (mode) {
+        case BUZZER_MODE_OFF:
+            digitalWrite(_buzzerPin, LOW);
+            _buzzerPinState = false;
+            break;
+        case BUZZER_MODE_CONTINUOUS:
+            digitalWrite(_buzzerPin, HIGH);
+            _buzzerPinState = true;
+            break;
+        case BUZZER_MODE_INTERMITTENT:
+            digitalWrite(_buzzerPin, HIGH);   // start the first beep immediately
+            _buzzerPinState  = true;
+            _buzzerLastToggle = millis();
+            break;
+    }
+}
+
+void ActuatorController::updateBuzzer() {
+    // Only the intermittent pattern needs periodic servicing.
+    if (_buzzerMode != BUZZER_MODE_INTERMITTENT) return;
+
+    if (millis() - _buzzerLastToggle >= BUZZER_BEEP_INTERVAL_MS) {
+        _buzzerLastToggle = millis();
+        _buzzerPinState = !_buzzerPinState;
+        digitalWrite(_buzzerPin, _buzzerPinState ? HIGH : LOW);
+    }
+}
+
+// ==========================================
+// Water Pumps (Active LOW Relay)
+// ==========================================
+
+void ActuatorController::pump1On() {
+    digitalWrite(_pump1Pin, LOW);   // Active LOW: LOW = relay ON
+    _pump1Active = true;
+}
+
+void ActuatorController::pump1Off() {
+    digitalWrite(_pump1Pin, HIGH);  // Active LOW: HIGH = relay OFF
+    _pump1Active = false;
+}
+
+void ActuatorController::setPump1(const String& command) {
+    if (command == "ON") {
+        pump1On();
+    } else if (command == "OFF") {
+        pump1Off();
+    }
+}
+
+void ActuatorController::pump2On() {
+    digitalWrite(_pump2Pin, LOW);   // Active LOW: LOW = relay ON
+    _pump2Active = true;
+}
+
+void ActuatorController::pump2Off() {
+    digitalWrite(_pump2Pin, HIGH);  // Active LOW: HIGH = relay OFF
+    _pump2Active = false;
+}
+
+void ActuatorController::setPump2(const String& command) {
+    if (command == "ON") {
+        pump2On();
+    } else if (command == "OFF") {
+        pump2Off();
+    }
+}
+
+void ActuatorController::pump3On() {
+    digitalWrite(_pump3Pin, LOW);   // Active LOW: LOW = relay ON
+    _pump3Active = true;
+}
+
+void ActuatorController::pump3Off() {
+    digitalWrite(_pump3Pin, HIGH);  // Active LOW: HIGH = relay OFF
+    _pump3Active = false;
+}
+
+// ==========================================
+// Status LEDs (only one color ON at a time)
+// ==========================================
+
+void ActuatorController::setStatusLeds(const String& state) {
+    // EXCLUSIVE per-state drive: EVERY branch sets ALL THREE pins, so no colour can
+    // bleed into another (fixes the Green+Red co-activation seen in FIRE/MANUAL).
+    // ⚠️ Green LED (GPIO 18) is COMMON-ANODE / INVERTED: digitalWrite(HIGH) = OFF,
+    //    digitalWrite(LOW) = ON. Orange + Red are standard active-high (HIGH = ON).
+    if (state == "SAFE") {
+        digitalWrite(_ledGreenPin,  LOW);    // 🟢 green ON  (inverted: LOW = ON)
+        digitalWrite(_ledOrangePin, LOW);    // orange OFF
+        digitalWrite(_ledRedPin,    LOW);    // red OFF
+    } else if (state == "SENSOR_ALERT") {
+        digitalWrite(_ledGreenPin,  HIGH);   // green OFF
+        digitalWrite(_ledOrangePin, HIGH);   // 🟠 orange ON
+        digitalWrite(_ledRedPin,    LOW);    // red OFF
+    } else if (state == "FIRE" || state == "MANUAL") {
+        digitalWrite(_ledGreenPin,  HIGH);   // green OFF — EXPLICITLY driven HIGH (no bleed into red)
+        digitalWrite(_ledOrangePin, LOW);    // orange OFF
+        digitalWrite(_ledRedPin,    HIGH);   // 🔴 red ON
+    } else {
+        digitalWrite(_ledGreenPin,  HIGH);   // unknown/empty → all OFF (fail-dark)
+        digitalWrite(_ledOrangePin, LOW);
+        digitalWrite(_ledRedPin,    LOW);
+    }
+}
+
+// ==========================================
+// State → LED + Buzzer policy (single source of truth)
+// ==========================================
+void ActuatorController::applyState(const String& state) {
+    setStatusLeds(state);
+
+    if (state == "FIRE" || state == "MANUAL") {
+        setBuzzerMode(BUZZER_MODE_CONTINUOUS);
+    } else if (state == "SENSOR_ALERT") {
+        setBuzzerMode(BUZZER_MODE_INTERMITTENT);
+    } else {
+        setBuzzerMode(BUZZER_MODE_OFF);
+    }
+}
+
+// ==========================================
+// Batch Commands (mechanical actuators only)
+// ==========================================
+
+void ActuatorController::applyCommands(const String& gasValve,
+                                        const String& doors,
+                                        const String& pump1,
+                                        const String& pump2) {
+    setGasValve(gasValve);
+    setDoors(doors);
+    setPump1(pump1);
+    setPump2(pump2);
+
+    Serial.println("[Actuators] Applied -> Valve:" + gasValve +
+                   " Doors:" + doors +
+                   " Pump1:" + pump1 + " Pump2:" + pump2);
+}
+
+void ActuatorController::setAllSafe() {
+    openGasValve();
+    closeDoors();
+    setServoAngle(SERVO_AUX1_CH, SERVO_AUX_SAFE);   // aux servos 3-5 → rest
+    setServoAngle(SERVO_AUX2_CH, SERVO_AUX_SAFE);
+    setServoAngle(SERVO_AUX3_CH, SERVO_AUX_SAFE);
+    pump1Off();
+    pump2Off();
+    pump3Off();   // all three suppression pumps OFF in SAFE
+    applyState("SAFE");   // green LED + buzzer OFF
+    Serial.println("[Actuators] All set to SAFE defaults.");
+}
+
+void ActuatorController::setEmergency() {
+    closeGasValve();
+    openDoors();
+    setServoAngle(SERVO_AUX1_CH, SERVO_AUX_EMERGENCY);   // aux servos 3-5 → active
+    setServoAngle(SERVO_AUX2_CH, SERVO_AUX_EMERGENCY);
+    setServoAngle(SERVO_AUX3_CH, SERVO_AUX_EMERGENCY);
+    pump1On();
+    pump2On();
+    pump3On();   // all three suppression pumps ON together (dry-run cutoff still applies)
+    applyState("FIRE");   // red LED + continuous buzzer
+    Serial.println("[Actuators] EMERGENCY mode activated!");
+}

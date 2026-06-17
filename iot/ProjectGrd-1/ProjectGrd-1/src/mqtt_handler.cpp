@@ -142,9 +142,7 @@ void MqttHandler::_handleMessage(char* topic, byte* payload, unsigned int length
 // Publishing
 // ==========================================
 void MqttHandler::publishSensorData(float gas1, float gas2, float gas3, float gas4,
-                                     float temp, float hum,
-                                     float ax, float ay, float az,
-                                     bool tilt, bool flame,
+                                     float temp, float hum, bool flame,
                                      float waterLevelPct, float waterDistanceCm,
                                      bool manualTrigger,
                                      int rssi, const char* mode) {
@@ -164,11 +162,7 @@ void MqttHandler::publishSensorData(float gas1, float gas2, float gas3, float ga
     env["temp"] = temp;
     env["hum"]  = hum;
 
-    JsonObject motion = doc["motion"].to<JsonObject>();
-    motion["ax"]   = ax;
-    motion["ay"]   = ay;
-    motion["az"]   = az;
-    motion["tilt"] = tilt;
+    // (MPU6050 removed — no "motion" object in the payload.)
 
     JsonObject water = doc["water"].to<JsonObject>();
     water["level_pct"]   = waterLevelPct;

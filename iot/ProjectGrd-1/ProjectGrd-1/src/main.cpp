@@ -2,14 +2,13 @@
  * ============================================================
  *  Smart Fire Fighting System (SFFS) — ESP32 Firmware
  * ============================================================
- * Target: CLASSIC ESP32 WROOM-32 (38-pin)pio run --target clean
+ * Target: CLASSIC ESP32 WROOM-32 (38-pin)
  * Subsystems:
- *   - Sensor telemetry  (MQ-2/5/6/7, DHT22, MPU6050, IR flame, HC-SR04)
+ *   - Sensor telemetry  (MQ-2/5/6/7, DHT22, IR flame, HC-SR04)
  *   - EMA noise filtering
  *   - WiFi auto-reconnect
  *   - Non-blocking MQTT (JSON publish + AI command subscribe)
- *   - Servo/pump/LED actuators
- *   - Verified, retrying GSM SMS alerts (SIM800L)
+ *   - PCA9685 servo driver + pump/LED actuators
  *   - Autonomous failsafe state machine with pump dry-run protection
  *
  * The loop never blocks: every subsystem is millis()-gated. Emergency
@@ -23,7 +22,6 @@
 #include <Wire.h>
 #include "config.h"
 #include "sensors.h"
-// #include "gsm.h"          // SIM800L REMOVED — re-include to restore GSM
 #include "wifi_manager.h"
 #include "mqtt_handler.h"
 #include "actuators.h"
@@ -33,7 +31,6 @@
 // Global Module Instances
 // ==========================================
 SensorsManager     sensors;
-// GsmController      gsm(Serial2);  // SIM800L REMOVED (its UART2 pins 16/17 are now the buttons)
 WifiManager        wifi(WIFI_SSID, WIFI_PASSWORD, WIFI_RETRY_DELAY);
 MqttHandler        mqttHandler(MQTT_BROKER, MQTT_PORT, MQTT_CLIENT_ID);
 ActuatorController actuators;
@@ -50,20 +47,14 @@ bool manualAlarmActive = false;   // a manual button armed the current latch (�
 bool btn1WasPressed    = false;
 bool btn2WasPressed    = false;
 
-// UNIFIED 5-second non-blocking FIRE alarm latch. EVERY trigger — manual button,
-// local gas/smoke/flame, or AI camera FIRE — arms a single 5s full-suppression
-// burst (ALARM_LATCH_MS) that auto-clears to SAFE. Caps pump runtime (anti-flood/
-// burnout) and decouples the alarm from button hold-time. A fresh trigger edge
-// re-arms (restarts) the 5s window.
+// UNIFIED 5-second non-blocking FIRE latch. ANY active trigger — manual button,
+// local gas/smoke, local FLAME, or AI camera FIRE — holds the full-suppression set.
+// The 5s window (ALARM_LATCH_MS) REFRESHES while a trigger is sustained and restarts
+// on a fresh press; exactly 5s after the LAST active trigger clears, the node
+// auto-returns to SAFE (anti-flood / anti-burnout, and frees the alarm from hold-time).
 bool          fireAlarmActive  = false;
 unsigned long fireAlarmStart   = 0;
-bool          sensorDangerPrev = false;   // rising-edge tracking: local gas/smoke (→ FIRE)
-bool          aiFirePrev       = false;   // rising-edge tracking: AI FIRE command
-
-// Local early-warning tier (FLAME or TILT/earthquake) → SENSOR_ALERT, NOT FIRE.
-// Edge-applied so the intermittent buzzer isn't re-initialised every loop.
-bool          localAlertActive = false;   // flame or tilt currently asserted
-bool          localAlertPrev   = false;   // edge tracking for the SENSOR_ALERT display
+bool          aiFireActive      = false;  // latest AI command == FIRE (while online + NORMAL)
 
 // Failsafe edge latches (apply emergency / safe actuators ONCE)
 bool standaloneApplied = false;
@@ -73,23 +64,14 @@ bool recoveryApplied   = false;
 bool pumpsCutForWater  = false;
 bool refillAlertActive = false;
 
-// SIM800L REMOVED — GSM SMS delivery bookkeeping disabled.
-// bool gsmSmsConfirmed   = false;
-// int  gsmSmsAttempts    = 0;
-// bool gsmGaveUpLogged   = false;
-
 // ==========================================
 // Prototypes
 // ==========================================
 void processAiCommands();
 void processManualButtons();
-void processLocalSensors();
-void armFireAlarm(const char* source);
 void updateFireAlarm();
 void processFailsafe();
 void managePumpWaterSafety();
-// void manageStandaloneSms();   // SIM800L REMOVED
-// void resetSmsState();          // SIM800L REMOVED
 void publishSensorData();
 void publishHeartbeat();
 void printTelemetry();
@@ -108,14 +90,13 @@ void setup() {
     pinMode(BOOT_LED_PIN, OUTPUT);
     digitalWrite(BOOT_LED_PIN, HIGH);  // LED ON during boot
 
-    // Shared hardware I2C bus — begin it ONCE so BOTH the MPU6050 (@0x68, in
-    // sensors.begin) and the PCA9685 (@0x40, in actuators.begin) attach to it.
+    // Hardware I2C bus (dedicated to the PCA9685 @0x40). Begin it here; the PCA9685
+    // is brought up in actuators.begin().
     Wire.begin(I2C_SDA, I2C_SCL);
 
     sensors.begin();
-    // gsm.begin();   // SIM800L REMOVED
     actuators.begin(BUZZER_PIN,
-                    PUMP1_PIN, PUMP2_PIN, PUMP3_PIN,
+                    PUMP1_PIN, PUMP2_PIN,
                     LED_GREEN_PIN, LED_ORANGE_PIN, LED_RED_PIN);
     failsafe.begin();
 
@@ -141,7 +122,6 @@ void setup() {
 void loop() {
     // 1. Update module state machines (none of these block)
     sensors.update();
-    // gsm.update();   // SIM800L REMOVED
     wifi.update();
     mqttHandler.update();   // B5: non-blocking, WiFi-gated reconnect w/ backoff
     actuators.updateBuzzer();   // tick the non-blocking buzzer pattern (intermittent/continuous)
@@ -154,12 +134,12 @@ void loop() {
                     || (sensors.getTemperature() > TEMP_THRESHOLD);
     }
 
-    // 3. Alarm triggers
-    processManualButtons();    // manual buttons → 5s FIRE latch
-    processLocalSensors();     // gas/smoke → 5s FIRE latch; flame/tilt → SENSOR_ALERT
-    processAiCommands();       // AI FIRE arms the latch; AI SAFE/SENSOR_ALERT applied live
+    // 3. Alarm trigger inputs
+    processManualButtons();    // manual buttons → MQTT manual_trigger + latch input
+    processAiCommands();       // AI FIRE → latch input; AI SAFE/SENSOR_ALERT applied live
 
-    // 4. Auto-shutoff: return to SAFE exactly 5s after the latch was last armed
+    // 4. Unified 5s FIRE latch: ANY sustained trigger (manual / gas / FLAME / AI) holds
+    //    full suppression; auto-returns to SAFE 5s after the LAST trigger clears.
     updateFireAlarm();
 
     // 5. Pump dry-run protection (every loop — Pump 3 runs continuously)
@@ -195,120 +175,77 @@ void processAiCommands() {
     ActuatorCommand cmd = mqttHandler.getLatestCommand();
     if (!cmd.isValid) return;
 
-    // In failsafe (offline) modes the ESP32 is autonomous — ignore AI entirely.
-    // Reset the edge tracker so a still-FIRE AI re-arms on return to NORMAL.
+    // In failsafe (offline) modes the ESP32 is autonomous — ignore AI entirely and
+    // drop the FIRE level so a stale command can't hold the latch.
     if (failsafe.getState() != FailsafeManager::STATE_NORMAL) {
-        aiFirePrev = false;
+        aiFireActive = false;
         return;
     }
 
-    bool aiFire = (strcmp(cmd.state, "FIRE") == 0);
+    // Track AI FIRE as a LEVEL — it feeds the unified latch (a sustained AI FIRE holds
+    // suppression; updateFireAlarm() applies the 5s auto-shutoff once it clears).
+    aiFireActive = (strcmp(cmd.state, "FIRE") == 0);
 
-    if (aiFire) {
-        // A fresh AI→FIRE transition arms the 5s latch (manual press takes priority).
-        // A sustained FIRE does NOT keep re-arming → 5s auto-shutoff still applies.
-        if (!aiFirePrev && !manualAlarmActive) {
-            armFireAlarm("AI command");
-        }
-    } else {
-        // Non-FIRE AI states (SAFE / SENSOR_ALERT) are display/warning states: apply
-        // them live, but never override a FIRE latch, a manual alarm, or a local
-        // flame/tilt SENSOR_ALERT (which processLocalSensors owns).
-        if (!fireAlarmActive && !manualAlarmActive && !localAlertActive) {
-            actuators.applyCommands(cmd.gasValve, cmd.doors, cmd.pump1, cmd.pump2);
-            actuators.applyState(cmd.state);   // LED color + buzzer pattern from state
-            Serial.print("[AI CMD] Executed: State=");
-            Serial.print(cmd.state);
-            Serial.print(" Conf=");
-            Serial.println(cmd.confidence, 2);
-        }
+    // Non-FIRE AI states (SAFE / SENSOR_ALERT) are display/warning states: apply them
+    // live, but never override an active FIRE latch or a held manual button.
+    if (!aiFireActive && !fireAlarmActive && !manualAlarmActive) {
+        actuators.applyCommands(cmd.gasValve, cmd.doors, cmd.pump1, cmd.pump2);
+        actuators.applyState(cmd.state);   // LED color + buzzer pattern from state
+        Serial.print("[AI CMD] Executed: State=");
+        Serial.print(cmd.state);
+        Serial.print(" Conf=");
+        Serial.println(cmd.confidence, 2);
     }
-    aiFirePrev = aiFire;
 }
 
 // ==========================================
-// Local Sensors — priority matrix
+// Unified 5-Second FIRE Alarm Latch (non-blocking, level-based)
 // ==========================================
-//   GAS / SMOKE (MQ)      → full FIRE latch (unified 5s), rising-edge armed.
-//   FLAME (IR) or TILT    → SENSOR_ALERT (orange LED + intermittent buzzer); does
-//   (MPU6050 earthquake)    NOT trip FIRE — only gas/AI camera/manual buttons do.
-// FIRE outranks SENSOR_ALERT; the warning display is edge-applied so the
-// intermittent buzzer pattern isn't re-initialised every loop.
-void processLocalSensors() {
-    // Stand down ONLY while the failsafe is actively driving the actuators
-    // (STANDALONE_ALERT). In NORMAL, DEGRADED and RECOVERY the local sensors stay
-    // LIVE — this is the Bug-3 fix: previously a missing MQTT broker dropped the node
-    // into DEGRADED and the early-return killed the flame/tilt alert on the bench.
-    if (failsafe.shouldActAutonomously()) {
-        sensorDangerPrev = false;
-        localAlertPrev   = false;
-        localAlertActive = false;
-        return;
-    }
-
-    // --- Priority 1: GAS/SMOKE → FIRE latch (rising edge). Warm-up gated: the MQ
-    //     heaters need ~60 s to stabilise before their readings are trustworthy. ---
-    bool gasDanger = sensors.isWarmedUp() && sensors.isGasDanger();
-    if (gasDanger && !sensorDangerPrev && !manualAlarmActive) {
-        armFireAlarm("local gas/smoke");
-    }
-    sensorDangerPrev = gasDanger;
-
-    // --- Priority 2: FLAME or TILT → SENSOR_ALERT (warning only). NOT warm-up
-    //     gated: the IR flame sensor and the MPU6050 need no heater warm-up, so they
-    //     must respond instantly (Bug-3: flame was being ignored during warm-up). ---
-    localAlertActive = (sensors.isFlameDetected() || sensors.isTiltDetected());
-
-    // A confirmed FIRE (gas/AI/manual) outranks the warning. Reset the edge so a
-    // still-present flame/tilt re-asserts SENSOR_ALERT once the FIRE clears.
-    if (fireAlarmActive || manualAlarmActive) {
-        localAlertPrev = false;
-        return;
-    }
-
-    if (localAlertActive && !localAlertPrev) {
-        actuators.applyState("SENSOR_ALERT");   // edge: 🟠 orange LED + intermittent buzzer
-        Serial.println("[Sensor] FLAME/TILT detected → SENSOR_ALERT (orange + intermittent buzzer).");
-    } else if (!localAlertActive && localAlertPrev) {
-        actuators.applyState("SAFE");           // edge: clear back to 🟢 green / silent
-        Serial.println("[Sensor] FLAME/TILT cleared → SAFE.");
-    }
-    localAlertPrev = localAlertActive;
-}
-
-// ==========================================
-// Unified 5-Second FIRE Alarm Latch (non-blocking)
-// ==========================================
-// armFireAlarm() drives the FULL suppression set (valve CLOSE, doors OPEN, both
-// pumps ON, red LED, continuous buzzer) and (re)starts the 5s timer. Every FIRE
-// trigger — manual button, local gas/smoke/flame, or AI FIRE — routes through it.
-void armFireAlarm(const char* source) {
-    actuators.setEmergency();
-    fireAlarmStart = millis();
-    Serial.print(fireAlarmActive ? "[Alarm] FIRE latch RE-ARMED (5s) — "
-                                  : "[Alarm] 🔥 FIRE latch ARMED (5s) — ");
-    Serial.println(source);
-    fireAlarmActive = true;
-}
-
-// updateFireAlarm() enforces the timeout. After exactly ALARM_LATCH_MS it returns
-// the node to SAFE. If the failsafe has taken over (offline standalone), it hands
-// the actuators off WITHOUT forcing SAFE so the two mechanisms never fight.
+// Fuses ALL emergency triggers and holds the FULL suppression set (valve CLOSE,
+// doors OPEN, both pumps ON, red LED, continuous buzzer) for ALARM_LATCH_MS:
+//   • Manual buttons (GPIO 16/17)      — held or pulsed
+//   • Local GAS/SMOKE (MQ, warm-up gated)
+//   • Local FLAME (IR, instant)
+//   • AI camera FIRE command
+// The 5s window REFRESHES every loop a trigger is active, so a SUSTAINED trigger
+// (held button / persistent gas / continuous AI FIRE) keeps suppression on, and a
+// fresh press restarts it. Exactly 5s after the LAST trigger clears → auto-SAFE.
+// While the failsafe is driving actuators (offline STANDALONE), this stands down so
+// the two mechanisms never fight.
 void updateFireAlarm() {
-    if (!fireAlarmActive) return;
-
     if (failsafe.shouldActAutonomously()) {
-        fireAlarmActive   = false;
-        manualAlarmActive = false;   // failsafe owns the actuators now
+        fireAlarmActive = false;
+        aiFireActive    = false;     // failsafe owns the actuators now
         return;
     }
+    if (!mqttHandler.isConnected()) {
+        aiFireActive = false;        // no live AI → a stale FIRE must not hold the latch
+    }
 
-    if (millis() - fireAlarmStart >= ALARM_LATCH_MS) {
-        fireAlarmActive   = false;
-        manualAlarmActive = false;   // also clears manual_trigger for the AI
-        actuators.setAllSafe();      // valve OPEN, doors CLOSE, pumps OFF, green ON, buzzer off
-        publishSensorData();         // tell the AI manual_trigger is cleared
-        Serial.println("[Alarm] ⏱️ 5s elapsed → auto-shutoff. Returned to SAFE.");
+    // Level-based trigger fusion — ANY active source keeps the window open.
+    bool manualTrig = manualAlarmActive;                          // button(s) held
+    bool gasTrig    = sensors.isWarmedUp() && sensors.isGasDanger();
+    bool flameTrig  = sensors.isFlameDetected();                  // IR flame → FIRE (no warm-up)
+    bool triggerActive = manualTrig || gasTrig || flameTrig || aiFireActive;
+
+    unsigned long now = millis();
+
+    if (triggerActive) {
+        fireAlarmStart = now;                 // refresh while sustained / on each fresh press
+        if (!fireAlarmActive) {
+            fireAlarmActive = true;
+            actuators.setEmergency();         // valve CLOSE, doors OPEN, BOTH pumps ON, red LED, continuous buzzer
+            Serial.print("[Alarm] 🔥 FIRE latch ARMED (5s) — src:");
+            Serial.print(manualTrig    ? "MANUAL " : "");
+            Serial.print(gasTrig       ? "GAS "    : "");
+            Serial.print(flameTrig     ? "FLAME "  : "");
+            Serial.println(aiFireActive ? "AI"     : "");
+        }
+    } else if (fireAlarmActive && (now - fireAlarmStart >= ALARM_LATCH_MS)) {
+        fireAlarmActive = false;
+        actuators.setAllSafe();               // valve OPEN, doors CLOSE, pumps OFF, green ON, buzzer off
+        publishSensorData();                  // tell the AI the node returned to SAFE
+        Serial.println("[Alarm] ⏱️ 5s elapsed, no active trigger → auto-shutoff. Returned to SAFE.");
     }
 }
 
@@ -328,10 +265,8 @@ void processFailsafe() {
             pumpsCutForWater  = false;
             Serial.println("[Failsafe] STANDALONE actuators latched (edge).");
         }
-
-        // managePumpWaterSafety() now runs every loop (see loop step 5) — Pump 3 is
-        // continuous, so its dry-run guard can't live in the offline-only path.
-        // manageStandaloneSms();  // SIM800L REMOVED — standalone alert still trips actuators/buzzer
+        // Pump dry-run protection runs every loop (loop step 5) and covers the
+        // standalone state too — no per-pump handling needed here.
     } else {
         standaloneApplied = false;
     }
@@ -343,111 +278,47 @@ void processFailsafe() {
             recoveryApplied = true;
             Serial.println("[Failsafe] RECOVERY: actuators returned to safe (edge).");
         }
-        // resetSmsState();   // SIM800L REMOVED
     } else if (st == FailsafeManager::STATE_NORMAL) {
         recoveryApplied = false;
-        // resetSmsState();   // SIM800L REMOVED
     }
 }
 
 // ==========================================
-// B6: Pump Dry-Run Protection — UNIFIED for Pumps 1, 2 & 3 (runs EVERY loop)
+// B6: Pump Dry-Run Protection — Pumps 1 & 2 (runs EVERY loop)
 // ==========================================
-// All three pumps are now active-suppression pumps (ON only in EMERGENCY). The
-// dry-run cutoff applies to them identically: if the tank drops below the cutoff
-// while any pump is running, ALL three are shut off; once refilled past the resume
-// threshold, all three are re-enabled together — but ONLY while a fire emergency
-// still requires suppression. Hysteresis (PUMP_DRY_CUTOFF_PCT → WATER_REFILL_RESUME_PCT)
-// prevents relay chatter around the threshold.
+// Both pumps are active-suppression pumps (ON only in EMERGENCY). If the tank drops
+// below the cutoff while either is running, both are shut off; once refilled past the
+// resume threshold they are re-enabled together — but ONLY while a fire emergency is
+// still active. Hysteresis (PUMP_DRY_CUTOFF_PCT → WATER_REFILL_RESUME_PCT) prevents
+// relay chatter around the threshold.
 void managePumpWaterSafety() {
     float level    = sensors.getWaterLevelPct();
     bool  dry      = (level < PUMP_DRY_CUTOFF_PCT);
     bool  refilled = (level >= WATER_REFILL_RESUME_PCT);
 
     if (!pumpsCutForWater && dry &&
-        (actuators.isPump1Active() || actuators.isPump2Active() || actuators.isPump3Active())) {
-        // Empty tank while pumping → cut all three to prevent dry-running.
+        (actuators.isPump1Active() || actuators.isPump2Active())) {
+        // Empty tank while pumping → cut both to prevent dry-running.
         actuators.pump1Off();
         actuators.pump2Off();
-        actuators.pump3Off();
         pumpsCutForWater  = true;
         refillAlertActive = true;
         Serial.print("[Safety] WATER LOW (");
         Serial.print(level, 1);
-        Serial.println("%) → ALL pumps OFF (dry-run prevention). REFILL ALERT raised.");
+        Serial.println("%) → pumps OFF (dry-run prevention). REFILL ALERT raised.");
     } else if (pumpsCutForWater && refilled) {
-        // Re-enable all three together ONLY if a fire emergency is still active.
+        // Re-enable both ONLY if a fire emergency is still active.
         if (fireAlarmActive || failsafe.shouldActAutonomously()) {
             actuators.pump1On();
             actuators.pump2On();
-            actuators.pump3On();
             Serial.print("[Safety] Water restored (");
             Serial.print(level, 1);
-            Serial.println("%) → all pumps re-enabled.");
+            Serial.println("%) → pumps re-enabled.");
         }
         pumpsCutForWater  = false;
         refillAlertActive = false;
     }
 }
-
-// ==========================================
-// B6: Verified SMS Delivery with Bounded Retries  — SIM800L REMOVED
-// ==========================================
-// The entire SMS path is disabled while the SIM800L is unplugged. The failsafe
-// still trips local suppression (actuators + buzzer) when offline; it just no
-// longer sends an SMS. Re-enable by restoring the gsm object in this file and
-// uncommenting this block.
-/*
-void manageStandaloneSms() {
-    if (!sensors.isWarmedUp()) return;
-
-    // Only trust SUCCESS that belongs to THIS episode (attempts > 0); a result
-    // left over from a previous standalone episode must not suppress a new alert.
-    if (gsmSmsAttempts > 0 && gsm.getResult() == GsmController::GSM_RESULT_SUCCESS) {
-        if (!gsmSmsConfirmed) {
-            gsmSmsConfirmed = true;
-            Serial.println("[Failsafe] SMS delivery CONFIRMED by SIM800L.");
-        }
-        return;
-    }
-    if (gsmSmsConfirmed) return;
-    if (gsm.isBusy())    return;   // an attempt (or its cooldown) is still running
-
-    if (gsmSmsAttempts >= MAX_SMS_RETRIES) {
-        if (!gsmGaveUpLogged) {
-            gsmGaveUpLogged = true;
-            Serial.print("[Failsafe] SMS FAILED after ");
-            Serial.print(MAX_SMS_RETRIES);
-            Serial.println(" attempts. Giving up (buzzer/pumps remain active).");
-        }
-        return;
-    }
-
-    // Build the message in a fixed stack buffer (no heap String).
-    char sms[161];   // 160 GSM chars + NUL
-    snprintf(sms, sizeof(sms),
-        "SFFS STANDALONE ALERT! Temp:%.1fC Gas:%d Flame:%s Water:%.0f%% WiFi:DOWN MQTT:DOWN",
-        sensors.getTemperature(), (int)sensors.getGas1(),
-        sensors.isFlameDetected() ? "YES" : "NO", sensors.getWaterLevelPct());
-
-    if (gsm.sendSMSAsync(GSM_PHONE_NUMBER, sms)) {
-        gsmSmsAttempts++;
-        Serial.print("[Failsafe] SMS attempt ");
-        Serial.print(gsmSmsAttempts);
-        Serial.print("/");
-        Serial.println(MAX_SMS_RETRIES);
-    }
-}
-
-void resetSmsState() {
-    if (gsmSmsAttempts != 0 || gsmSmsConfirmed) {
-        Serial.println("[Failsafe] SMS state reset (connectivity restored).");
-    }
-    gsmSmsAttempts  = 0;
-    gsmSmsConfirmed = false;
-    gsmGaveUpLogged = false;
-}
-*/
 
 // ==========================================
 // MQTT Publishing
@@ -468,8 +339,7 @@ void publishSensorData() {
         sensors.getGas1(), sensors.getGas2(),
         sensors.getGas3(), sensors.getGas4(),
         sensors.getTemperature(), sensors.getHumidity(),
-        sensors.getAccelX(), sensors.getAccelY(), sensors.getAccelZ(),
-        sensors.isTiltDetected(), sensors.isFlameDetected(),
+        sensors.isFlameDetected(),
         sensors.getWaterLevelPct(), sensors.getWaterDistanceCm(),
         manualAlarmActive,                       // manual_trigger → AI forces FIRE
         wifi.getRSSI(), mode                      // meta.mode = "GAS_ALARM" when gas detected
@@ -504,9 +374,6 @@ void printTelemetry() {
     Serial.print("°C | Hum: ");         Serial.print(sensors.getHumidity(), 1);
     Serial.println("%");
 
-    Serial.print("📐 Tilt | Angle: ");  Serial.print(sensors.getTiltAngle(), 1);
-    Serial.print("° | ");               Serial.println(sensors.isTiltDetected() ? "TILT ⚠️" : "Level");
-
     Serial.print("🔥 Flame: ");         Serial.println(sensors.isFlameDetected() ? "DETECTED! 🚨" : "Clear");
 
     Serial.print("💧 Water | Level: "); Serial.print(sensors.getWaterLevelPct(), 1);
@@ -536,18 +403,16 @@ void printTelemetry() {
         if (remainMs < 0) remainMs = 0;
         Serial.print(manualAlarmActive ? "MANUAL " : "FIRE ");
         Serial.print(remainMs / 1000.0f, 1);
-        Serial.print("s left");
+        Serial.println("s left");
     } else {
-        Serial.print("—");
+        Serial.println("—");
     }
-    Serial.println(" | GSM/SMS: SIM REMOVED");
 
     Serial.print("⚙️ Actuators | Valve: "); Serial.print(actuators.isGasValveOpen() ? "OPEN" : "CLOSED");
     Serial.print(" | Doors: ");              Serial.print(actuators.isDoorOpen() ? "OPEN" : "CLOSED");
     Serial.print(" | Buzzer: ");             Serial.print(actuators.isBuzzerActive() ? "ON 🔊" : "OFF");
     Serial.print(" | Pump1: ");              Serial.print(actuators.isPump1Active() ? "ON 💧" : "OFF");
-    Serial.print(" | Pump2: ");              Serial.print(actuators.isPump2Active() ? "ON 💧" : "OFF");
-    Serial.print(" | Pump3: ");              Serial.println(actuators.isPump3Active() ? "ON 💧" : "OFF");
+    Serial.print(" | Pump2: ");              Serial.println(actuators.isPump2Active() ? "ON 💧" : "OFF");
 
     Serial.print("💾 Heap: ");            Serial.print(ESP.getFreeHeap());
     Serial.print(" bytes | Uptime: ");    Serial.print(millis() / 1000);
@@ -557,27 +422,31 @@ void printTelemetry() {
 }
 
 // ==========================================
-// Manual Alarm Buttons — arm the unified 5s latch (edge-detected)
+// Manual Alarm Buttons — feed the unified 5s latch (level + edge MQTT)
 // ==========================================
-// A brief click (no hold needed) (re)arms the 5s FIRE latch via armFireAlarm().
-// The latch auto-shuts off after 5s (updateFireAlarm). Skipped only while the
-// failsafe is already driving actuators (STANDALONE).
+// Sets manualAlarmActive (level) so updateFireAlarm() arms/refreshes the 5s FIRE
+// latch — a brief click fires it, a sustained hold keeps it refreshed. Button edges
+// also push manual_trigger to the AI immediately. The latch auto-shuts off 5s after
+// release (updateFireAlarm), and stands down while the failsafe owns the actuators.
 void processManualButtons() {
     bool btn1Now = sensors.isButton1Pressed();
     bool btn2Now = sensors.isButton2Pressed();
 
-    bool btn1Rising = (btn1Now && !btn1WasPressed);
-    bool btn2Rising = (btn2Now && !btn2WasPressed);
+    // manual_trigger (for the AI) and the latch input both reflect whether EITHER
+    // button is currently held. The 5s latch is armed/refreshed by updateFireAlarm(),
+    // so a quick pulse fires it AND a sustained hold keeps it refreshed.
+    manualAlarmActive = btn1Now || btn2Now;
 
-    if ((btn1Rising || btn2Rising) && !failsafe.shouldActAutonomously()) {
-        const char* room = btn1Rising ? "Room 1" : "Room 2";
-        manualAlarmActive = true;            // suppresses AI path + sets manual_trigger
-        armFireAlarm("MANUAL button");       // full suppression for 5s (re-armed on each press)
-        mqttHandler.publishManualAlarm(room, true);
-        publishSensorData();                 // push manual_trigger=1 to the AI immediately
-        Serial.print("[MANUAL] 🚨 ");
-        Serial.print(room);
-        Serial.println(" button → 5s FIRE latch armed.");
+    // Announce each edge to the AI immediately (don't wait for the 2s cadence).
+    if (btn1Now != btn1WasPressed) {
+        mqttHandler.publishManualAlarm("Room 1", btn1Now);
+        publishSensorData();                 // push manual_trigger now
+        if (btn1Now) Serial.println("[MANUAL] 🚨 Room 1 button → 5s FIRE latch.");
+    }
+    if (btn2Now != btn2WasPressed) {
+        mqttHandler.publishManualAlarm("Room 2", btn2Now);
+        publishSensorData();
+        if (btn2Now) Serial.println("[MANUAL] 🚨 Room 2 button → 5s FIRE latch.");
     }
 
     btn1WasPressed = btn1Now;

@@ -3,13 +3,11 @@
 
 #include <Arduino.h>
 #include <DHT.h>
-#include <Adafruit_MPU6050.h>
-#include <Adafruit_Sensor.h>
 #include "filters.h"
 
 /**
  * @brief Manages all physical sensor inputs: 4x MQ gas sensors (with EMA filtering),
- * IR flame sensor, DHT22 (temp/humidity), and MPU6050 (accelerometer/tilt).
+ * IR flame sensor, DHT22 (temp/humidity), and HC-SR04 water level.
  */
 class SensorsManager {
 private:
@@ -30,13 +28,6 @@ private:
     float _ambientTemp;
     float _ambientHum;
     unsigned long _lastDhtRead;
-
-    // MPU6050 Motion/Tilt
-    Adafruit_MPU6050 _mpu;
-    float _accelX, _accelY, _accelZ;
-    float _tiltAngle;
-    bool _tiltDetected;
-    bool _mpuAvailable;
 
     // Flame sensor
     bool _flameDetected;
@@ -82,13 +73,6 @@ public:
 
     // ---- Flame Getter ----
     bool isFlameDetected() const { return _flameDetected; }
-
-    // ---- Motion / Tilt Getters ----
-    float getAccelX() const { return _accelX; }
-    float getAccelY() const { return _accelY; }
-    float getAccelZ() const { return _accelZ; }
-    float getTiltAngle() const { return _tiltAngle; }
-    bool isTiltDetected() const { return _tiltDetected; }
 
     // ---- System Status ----
     bool isWarmedUp() const { return _isWarmedUp; }

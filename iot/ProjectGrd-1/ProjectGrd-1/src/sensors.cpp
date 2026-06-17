@@ -1,6 +1,5 @@
 #include "sensors.h"
 #include "config.h"
-#include <Wire.h>
 
 SensorsManager::SensorsManager()
     : _mq2Filter(EMA_ALPHA),
@@ -10,8 +9,6 @@ SensorsManager::SensorsManager()
       _dht(DHT_PIN, DHT22),
       _filteredGas1(0), _filteredGas2(0), _filteredGas3(0), _filteredGas4(0),
       _ambientTemp(0), _ambientHum(0), _lastDhtRead(0),
-      _accelX(0), _accelY(0), _accelZ(0),
-      _tiltAngle(0), _tiltDetected(false), _mpuAvailable(false),
       _flameDetected(false), _isWarmedUp(false), _bootTime(0),
       _waterFilter(EMA_ALPHA), _waterDistanceCm(0), _waterLevelPct(0), _lastUltrasonicRead(0),
       _button1Pressed(false), _button2Pressed(false),
@@ -34,18 +31,8 @@ void SensorsManager::begin() {
     _dht.begin();
     Serial.println("[Sensors] DHT22 initialized on GPIO" + String(DHT_PIN));
 
-    // Initialize I2C and MPU6050
-    Wire.begin(I2C_SDA, I2C_SCL);
-    if (_mpu.begin(0x68, &Wire)) {
-        _mpuAvailable = true;
-        _mpu.setAccelerometerRange(MPU6050_RANGE_4_G);
-        _mpu.setFilterBandwidth(MPU6050_BAND_21_HZ);
-        Serial.println("[Sensors] MPU6050 initialized on I2C (SDA:" +
-                       String(I2C_SDA) + " SCL:" + String(I2C_SCL) + ")");
-    } else {
-        _mpuAvailable = false;
-        Serial.println("[Sensors] WARNING: MPU6050 not found! Tilt detection disabled.");
-    }
+    // (MPU6050 removed — the I2C bus is owned exclusively by the PCA9685, which is
+    //  initialised in ActuatorController::begin().)
 
     // Configure ultrasonic pins
     pinMode(ULTRASONIC_TRIG_PIN, OUTPUT);
@@ -100,26 +87,7 @@ void SensorsManager::update() {
     }
 
     // ==========================================
-    // 4. Read MPU6050 Accelerometer
-    // ==========================================
-    if (_mpuAvailable) {
-        sensors_event_t accel, gyro, temp;
-        _mpu.getEvent(&accel, &gyro, &temp);
-
-        _accelX = accel.acceleration.x;
-        _accelY = accel.acceleration.y;
-        _accelZ = accel.acceleration.z;
-
-        // Calculate tilt angle from gravity vector
-        // In a level position: ax≈0, ay≈0, az≈9.8
-        // tiltAngle = atan2(sqrt(ax² + ay²), az) × 180/π
-        float horizontalAccel = sqrt(_accelX * _accelX + _accelY * _accelY);
-        _tiltAngle = atan2(horizontalAccel, abs(_accelZ)) * 180.0f / PI;
-        _tiltDetected = (_tiltAngle > TILT_ANGLE_THRESHOLD);
-    }
-
-    // ==========================================
-    // 5. Warm-up Monitoring
+    // 4. Warm-up Monitoring
     // ==========================================
     if (!_isWarmedUp) {
         if (millis() - _bootTime >= SENSOR_WARMUP_MS) {
@@ -129,7 +97,7 @@ void SensorsManager::update() {
     }
 
     // ==========================================
-    // 6. Read HC-SR04 Ultrasonic Water Level
+    // 5. Read HC-SR04 Ultrasonic Water Level
     // ==========================================
     if (millis() - _lastUltrasonicRead >= ULTRASONIC_READ_INTERVAL_MS) {
         _lastUltrasonicRead = millis();
@@ -160,7 +128,7 @@ void SensorsManager::update() {
     }
 
     // ==========================================
-    // 7. Read Manual Alarm Buttons (Debounced)
+    // 6. Read Manual Alarm Buttons (Debounced)
     // ==========================================
     bool btn1Raw = (digitalRead(BUTTON1_PIN) == HIGH);
     bool btn2Raw = (digitalRead(BUTTON2_PIN) == HIGH);

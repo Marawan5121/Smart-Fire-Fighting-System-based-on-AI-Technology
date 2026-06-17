@@ -65,16 +65,13 @@ public:
      * @param gas1..gas4   Filtered MQ sensor values
      * @param temp         Ambient temperature (°C)
      * @param hum          Humidity (%)
-     * @param ax,ay,az     MPU6050 accelerometer readings
-     * @param tilt         Tilt detection flag
      * @param flame        Flame detection flag
      * @param manualTrigger Manual alarm button currently latched (→ AI forces FIRE)
      * @param rssi         WiFi RSSI (dBm)
      * @param mode         Current operating mode string
      */
     void publishSensorData(float gas1, float gas2, float gas3, float gas4,
-                           float temp, float hum,
-                           float ax, float ay, float az, bool tilt, bool flame,
+                           float temp, float hum, bool flame,
                            float waterLevelPct, float waterDistanceCm,
                            bool manualTrigger,
                            int rssi, const char* mode);

@@ -19,7 +19,4 @@
 #define MQTT_USERNAME      ""                // leave empty for anonymous broker
 #define MQTT_PASSWORD      ""
 
-// --- GSM SMS recipient (full international format) ---
-#define GSM_PHONE_NUMBER   "+200000000000"
-
 #endif // SECRETS_H

@@ -3,16 +3,15 @@
 
 ActuatorController::ActuatorController()
     : _gasValveOpen(true), _doorOpen(false), _buzzerActive(false),
-      _pump1Active(false), _pump2Active(false), _pump3Active(false),
+      _pump1Active(false), _pump2Active(false),
       _buzzerMode(BUZZER_MODE_OFF), _buzzerLastToggle(0), _buzzerPinState(false) {}
 
 void ActuatorController::begin(int buzzerPin,
-                                int pump1Pin, int pump2Pin, int pump3Pin,
+                                int pump1Pin, int pump2Pin,
                                 int ledGreenPin, int ledOrangePin, int ledRedPin) {
     _buzzerPin    = buzzerPin;
     _pump1Pin     = pump1Pin;
     _pump2Pin     = pump2Pin;
-    _pump3Pin     = pump3Pin;
     _ledGreenPin  = ledGreenPin;
     _ledOrangePin = ledOrangePin;
     _ledRedPin    = ledRedPin;
@@ -33,16 +32,17 @@ void ActuatorController::begin(int buzzerPin,
     pinMode(_buzzerPin, OUTPUT);
     digitalWrite(_buzzerPin, LOW);
 
-    // Configure pump relay pins (Active LOW: HIGH = OFF)
+    // Pump relays (Active-LOW: HIGH = OFF). GHOST-TRIGGER FIX: preset the latch HIGH
+    // *before* switching the pin to OUTPUT, so it never momentarily drives LOW (which
+    // an active-LOW relay reads as ON) during init. Then drive HIGH again to confirm.
+    // NOTE: for the pre-setup() reset window the GPIO still floats — add an external
+    // 10k pull-UP on each relay IN line (especially GPIO 23) to fully kill boot noise.
+    digitalWrite(_pump1Pin, HIGH);
     pinMode(_pump1Pin, OUTPUT);
     digitalWrite(_pump1Pin, HIGH);  // Pump 1 OFF at boot
+    digitalWrite(_pump2Pin, HIGH);
     pinMode(_pump2Pin, OUTPUT);
     digitalWrite(_pump2Pin, HIGH);  // Pump 2 OFF at boot
-
-    // Pump 3 (GPIO 13) is a standard suppression pump (like Pumps 1 & 2): OFF at
-    // boot, ON only in EMERGENCY, and protected by the dry-run cutoff.
-    pinMode(_pump3Pin, OUTPUT);
-    digitalWrite(_pump3Pin, HIGH);  // Pump 3 OFF at boot
 
     // Configure status LED pins. Green is COMMON-ANODE (inverted): HIGH = OFF.
     pinMode(_ledGreenPin, OUTPUT);
@@ -52,15 +52,14 @@ void ActuatorController::begin(int buzzerPin,
     pinMode(_ledRedPin, OUTPUT);
     digitalWrite(_ledRedPin, LOW);
 
-    // Set safe defaults at boot (positions all 5 servos; leaves Pump 3 ON).
+    // Set safe defaults at boot (positions both servos; all pumps OFF).
     setAllSafe();
 
     Serial.println("[Actuators] Initialized: PCA9685@0x" + String(PCA9685_I2C_ADDR, HEX) +
-                   " servos ch0-4" +
+                   " servos ch0-1" +
                    " | Buzzer=GPIO" + String(_buzzerPin) +
                    " Pump1=GPIO" + String(_pump1Pin) +
                    " Pump2=GPIO" + String(_pump2Pin) +
-                   " Pump3=GPIO" + String(_pump3Pin) +
                    " | LEDs=GPIO" + String(_ledGreenPin) + "/" +
                    String(_ledOrangePin) + "/" + String(_ledRedPin));
 }
@@ -199,16 +198,6 @@ void ActuatorController::setPump2(const String& command) {
     }
 }
 
-void ActuatorController::pump3On() {
-    digitalWrite(_pump3Pin, LOW);   // Active LOW: LOW = relay ON
-    _pump3Active = true;
-}
-
-void ActuatorController::pump3Off() {
-    digitalWrite(_pump3Pin, HIGH);  // Active LOW: HIGH = relay OFF
-    _pump3Active = false;
-}
-
 // ==========================================
 // Status LEDs (only one color ON at a time)
 // ==========================================
@@ -273,12 +262,8 @@ void ActuatorController::applyCommands(const String& gasValve,
 void ActuatorController::setAllSafe() {
     openGasValve();
     closeDoors();
-    setServoAngle(SERVO_AUX1_CH, SERVO_AUX_SAFE);   // aux servos 3-5 → rest
-    setServoAngle(SERVO_AUX2_CH, SERVO_AUX_SAFE);
-    setServoAngle(SERVO_AUX3_CH, SERVO_AUX_SAFE);
     pump1Off();
-    pump2Off();
-    pump3Off();   // all three suppression pumps OFF in SAFE
+    pump2Off();           // both suppression pumps OFF in SAFE
     applyState("SAFE");   // green LED + buzzer OFF
     Serial.println("[Actuators] All set to SAFE defaults.");
 }
@@ -286,12 +271,8 @@ void ActuatorController::setAllSafe() {
 void ActuatorController::setEmergency() {
     closeGasValve();
     openDoors();
-    setServoAngle(SERVO_AUX1_CH, SERVO_AUX_EMERGENCY);   // aux servos 3-5 → active
-    setServoAngle(SERVO_AUX2_CH, SERVO_AUX_EMERGENCY);
-    setServoAngle(SERVO_AUX3_CH, SERVO_AUX_EMERGENCY);
     pump1On();
-    pump2On();
-    pump3On();   // all three suppression pumps ON together (dry-run cutoff still applies)
+    pump2On();            // both suppression pumps ON (dry-run cutoff still applies)
     applyState("FIRE");   // red LED + continuous buzzer
     Serial.println("[Actuators] EMERGENCY mode activated!");
 }

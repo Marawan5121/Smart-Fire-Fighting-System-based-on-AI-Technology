@@ -12,18 +12,17 @@ enum BuzzerMode {
 };
 
 /**
- * @brief Controls all physical actuators: 2x SG90 servos (gas valve, doors),
- * active buzzer, 2x relay-controlled water pumps, and 3x status indicator LEDs.
- * Provides a clean command interface matching the MQTT command schema.
+ * @brief Controls all physical actuators: 2x SG90 servos (gas valve, doors) on a
+ * PCA9685 PWM driver, an active buzzer, 2x relay-controlled water pumps, and 3x
+ * status indicator LEDs. Provides a clean command interface matching the MQTT schema.
  */
 class ActuatorController {
 private:
-    Adafruit_PWMServoDriver _pwm;   // 5 servos on channels 0-4 (I2C @ 0x40)
+    Adafruit_PWMServoDriver _pwm;   // 2 servos on channels 0-1 (I2C @ 0x40)
 
     int _buzzerPin;
     int _pump1Pin;
     int _pump2Pin;
-    int _pump3Pin;
     int _ledGreenPin;
     int _ledOrangePin;
     int _ledRedPin;
@@ -34,7 +33,6 @@ private:
     bool _buzzerActive;
     bool _pump1Active;
     bool _pump2Active;
-    bool _pump3Active;
 
     // Non-blocking buzzer pattern state
     BuzzerMode    _buzzerMode;
@@ -47,11 +45,10 @@ private:
 public:
     ActuatorController();
 
-    /** @brief Init PCA9685 (servos ch 0-4) + configure buzzer/pump/LED pins.
-     *  Servos are on I2C now, so no servo GPIOs are passed. Pump 3 is driven
-     *  ALWAYS-ON here and is intentionally not touched by setEmergency/setAllSafe. */
+    /** @brief Init PCA9685 (servos ch 0-1) + configure buzzer/pump/LED pins.
+     *  Servos are on I2C, so no servo GPIOs are passed. */
     void begin(int buzzerPin,
-               int pump1Pin, int pump2Pin, int pump3Pin,
+               int pump1Pin, int pump2Pin,
                int ledGreenPin, int ledOrangePin, int ledRedPin);
 
     // ---- Gas Valve Servo ----
@@ -77,8 +74,6 @@ public:
     void pump2On();
     void pump2Off();
     void setPump2(const String& command);
-    void pump3On();
-    void pump3Off();
 
     // ---- Status LEDs ----
     /** @brief Set LEDs by system state: "SAFE"(🟢) "SENSOR_ALERT"(🟠) "FIRE"/"MANUAL"(🔴) */
@@ -102,7 +97,6 @@ public:
     bool isBuzzerActive() const { return _buzzerActive; }
     bool isPump1Active() const { return _pump1Active; }
     bool isPump2Active() const { return _pump2Active; }
-    bool isPump3Active() const { return _pump3Active; }
 };
 
 #endif // ACTUATORS_H

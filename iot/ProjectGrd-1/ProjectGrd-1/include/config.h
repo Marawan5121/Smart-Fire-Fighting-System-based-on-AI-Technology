@@ -2,7 +2,7 @@
 #define CONFIG_H
 
 #include <Arduino.h>
-#include "secrets.h"   // B7: WiFi/MQTT/GSM credentials live here (gitignored)
+#include "secrets.h"   // WiFi/MQTT credentials live here (gitignored)
 
 // Defensive defaults so the firmware still compiles if a secret is omitted.
 #ifndef MQTT_USERNAME
@@ -59,25 +59,23 @@
 #define FLAME_PIN        27    // IR Flame sensor (Active LOW)
 #define DHT_PIN          26    // DHT22 data pin
 
-// --- I2C bus (SHARED) — MPU6050 @0x68 + PCA9685 @0x40 ---
-// Both devices live on the one hardware I2C bus; distinct addresses → no conflict.
+// --- I2C bus — DEDICATED to the PCA9685 PWM driver @0x40 ---
+// The MPU6050 has been removed from the design, so this hardware I2C bus
+// (GPIO 21 SDA / 22 SCL) now carries the PCA9685 exclusively.
 #define I2C_SDA          21
 #define I2C_SCL          22
 
 // --- Digital Outputs ---
 #define BOOT_LED_PIN     2     // Built-in LED (boot indicator only)
 #define BUZZER_PIN       4     // Active buzzer
-// NOTE: All 5 servos are now driven by the PCA9685 over I2C (SERVO_*_CH below) — NOT
-//       by ESP32 GPIO. Old SERVO1/SERVO2 pins (18/19) are freed; GPIO 18 now hosts
-//       the green LED.
+// NOTE: Both servos are driven by the PCA9685 over I2C (SERVO_*_CH below), NOT by
+//       ESP32 GPIO. The old SERVO1/SERVO2 pins (18/19) are freed; GPIO 18 hosts the
+//       green LED.
 #define PUMP1_PIN        5     // Water pump 1 relay (Active LOW)
 #define PUMP2_PIN        23    // Water pump 2 relay (Active LOW)
-#define PUMP3_PIN        13    // Water pump 3 relay (Active LOW) — active-suppression pump.
-//       OFF in SAFE, ON in EMERGENCY (with Pumps 1 & 2), dry-run protected. GPIO 13 is a
-//       normal (non-strapping) pin, so the relay control line is safe at boot.
 
 // --- Status Indicator LEDs ---
-#define LED_GREEN_PIN    18    // Green LED (SAFE) — moved off 13 (now PUMP3); freed servo pin
+#define LED_GREEN_PIN    18    // Green LED (SAFE) — on a freed servo pin (servos now on PCA9685)
 #define LED_ORANGE_PIN   14    // Orange LED (SENSOR_ALERT — sensor early warning)
 #define LED_RED_PIN      25    // Red LED    (FIRE / MANUAL — confirmed emergency)
 
@@ -94,15 +92,7 @@
 #define BUTTON2_PIN      17    // Room 2 (INPUT_PULLDOWN, active HIGH)
 #define BUTTON_DEBOUNCE_MS   300
 
-// --- GSM Module (SIM800L) — REMOVED ---
-// The SIM800L is currently removed; it is NOT instantiated (see main.cpp — the
-// gsm object, begin(), update(), and the SMS path are all commented out). Its old
-// UART2 pins (16/17) are now the manual buttons, and GPIO 12 is now PUMP3. These
-// macros are DORMANT placeholders kept only so the unused gsm.cpp still compiles;
-// they are never used at runtime. To re-enable GSM: assign real, free pins here
-// then uncomment the gsm lines in main.cpp.
-#define GSM_RX_PIN       39    // (dormant placeholder) ESP32 RX ← SIM800L TX
-#define GSM_TX_PIN       39    // (dormant placeholder) ESP32 TX → SIM800L RX
+// (GSM/SIM800L hardware removed from the design — no UART2 pins reserved.)
 
 // ==========================================
 // 🌡️ Sensor Thresholds & Calibration
@@ -118,7 +108,6 @@
 // └─────────────────────────────────────────────────────────────┘
 #define GAS_THRESHOLD         2000    // ADC threshold for MQ sensors (0-4095)
 #define TEMP_THRESHOLD        50.0    // °C ambient threshold
-#define TILT_ANGLE_THRESHOLD  30.0    // degrees of tilt to trigger alert
 #define SENSOR_WARMUP_MS      60000   // 60s MQ warm-up gate
 
 // --- Ultrasonic water tank ---
@@ -137,7 +126,7 @@
 #define EMA_ALPHA            0.15f
 
 // ==========================================
-// 🎛️ PCA9685 16-ch PWM Servo Driver (I2C @ 0x40, shared bus 21/22)
+// 🎛️ PCA9685 16-ch PWM Servo Driver (I2C @ 0x40, dedicated bus 21/22)
 // ==========================================
 #define PCA9685_I2C_ADDR     0x40        // default address (A0-A5 unbridged)
 #define PCA9685_OSC_FREQ     27000000UL  // on-board oscillator (Adafruit calibration)
@@ -147,12 +136,9 @@
 #define SERVO_PWM_MIN        102         // ~0.5ms → 0°
 #define SERVO_PWM_MAX        491         // ~2.4ms → 180°
 
-// 5 servos → PCA9685 channels 0-4
+// 2 servos → PCA9685 channels 0-1 (3 extra servos to be added in a later step)
 #define SERVO_GAS_VALVE_CH   0           // Gas valve servo
 #define SERVO_DOORS_CH       1           // Door/window servo
-#define SERVO_AUX1_CH        2           // Aux servo 3 (vent/valve — role TBD)
-#define SERVO_AUX2_CH        3           // Aux servo 4 (role TBD)
-#define SERVO_AUX3_CH        4           // Aux servo 5 (role TBD)
 
 // ==========================================
 // 🔧 Servo Positions (degrees)
@@ -161,9 +147,6 @@
 #define SERVO_GAS_VALVE_CLOSED  90
 #define SERVO_DOOR_CLOSED       0
 #define SERVO_DOOR_OPEN         90
-// Aux servos 3-5 (roles TBD): rest vs active angles driven by setAllSafe/setEmergency.
-#define SERVO_AUX_SAFE          0
-#define SERVO_AUX_EMERGENCY     90
 
 // ==========================================
 // 🔊 Buzzer Patterns (non-blocking, millis()-driven)
@@ -189,13 +172,6 @@
 // ==========================================
 #define FAILSAFE_CRITICAL_TIMEOUT_MS  30000   // sustained danger before standalone
 #define FAILSAFE_RECOVERY_HOLD_MS     10000   // hold in recovery before NORMAL
-
-// ==========================================
-// 📞 GSM Alert Configuration  (recipient → secrets.h)
-// ==========================================
-#define GSM_BAUD          9600
-#define GSM_COOLDOWN_MS   5000    // recovery window after a failed AT step
-#define MAX_SMS_RETRIES   3       // B6: bounded verified-delivery retries
 
 // ==========================================
 // 📡 Serial & JSON

@@ -43,9 +43,14 @@ unsigned long lastSensorPublish  = 0;
 unsigned long lastHeartbeat       = 0;
 unsigned long lastTelemetryPrint  = 0;
 
-bool manualAlarmActive = false;   // a manual button armed the current latch (→ manual_trigger)
-bool btn1WasPressed    = false;
-bool btn2WasPressed    = false;
+// ---- THREE-TIER PRIORITY CONTROL MATRIX (strict precedence) ----
+//   Tier 1 — manualAlarmActive     : physical buttons (highest authority)
+//   Tier 2 — sensorEmergencyActive : local gas/smoke/flame → instant FIRE, bypasses AI
+//   Tier 3 — aiFireActive          : AI camera FIRE (lowest; skipped while Tier 1/2 active)
+bool manualAlarmActive     = false;   // a manual button armed the current latch (→ manual_trigger)
+bool sensorEmergencyActive = false;   // local gas/smoke/flame confirmed-fire (bypasses AI validation)
+bool btn1WasPressed        = false;
+bool btn2WasPressed        = false;
 
 // UNIFIED 5-second non-blocking FIRE latch. ANY active trigger — manual button,
 // local gas/smoke, local FLAME, or AI camera FIRE — holds the full-suppression set.
@@ -67,8 +72,9 @@ bool refillAlertActive = false;
 // ==========================================
 // Prototypes
 // ==========================================
-void processAiCommands();
 void processManualButtons();
+void processSensorEmergency();
+void processAiCommands();
 void updateFireAlarm();
 void processFailsafe();
 void managePumpWaterSafety();
@@ -134,12 +140,16 @@ void loop() {
                     || (sensors.getTemperature() > TEMP_THRESHOLD);
     }
 
-    // 3. Alarm trigger inputs
-    processManualButtons();    // manual buttons → MQTT manual_trigger + latch input
-    processAiCommands();       // AI FIRE → latch input; AI SAFE/SENSOR_ALERT applied live
+    // 3. THREE-TIER PRIORITY CONTROL MATRIX — evaluated in STRICT precedence order:
+    //    Tier 1: Manual buttons          (highest)
+    //    Tier 2: Local sensor emergency  (gas/smoke/flame → instant FIRE, bypasses AI)
+    //    Tier 3: AI camera commands      (lowest; left UNCONSUMED while Tier 1/2 active)
+    processManualButtons();     // → manualAlarmActive
+    processSensorEmergency();   // → sensorEmergencyActive (+ instant actuators.setEmergency())
+    processAiCommands();        // early-returns, command left unconsumed, if Tier 1/2 active
 
-    // 4. Unified 5s FIRE latch: ANY sustained trigger (manual / gas / FLAME / AI) holds
-    //    full suppression; auto-returns to SAFE 5s after the LAST trigger clears.
+    // 4. Unified 5s FIRE latch: ANY sustained FIRE trigger (manual / gas / smoke / flame /
+    //    AI) refreshes the window; auto-returns to SAFE exactly 5s after the LAST clears.
     updateFireAlarm();
 
     // 5. Pump dry-run protection (every loop — Pump 3 runs continuously)
@@ -172,23 +182,29 @@ void loop() {
 void processAiCommands() {
     if (!mqttHandler.hasNewCommand()) return;
 
-    ActuatorCommand cmd = mqttHandler.getLatestCommand();
-    if (!cmd.isValid) return;
+    // TIER PRECEDENCE: Manual (Tier 1) and Local Sensor Emergency (Tier 2) outrank the
+    // AI. Bail BEFORE getLatestCommand() so the command stays UNCONSUMED and is applied
+    // later, once the higher-priority trigger clears.
+    if (manualAlarmActive || sensorEmergencyActive) return;
 
-    // In failsafe (offline) modes the ESP32 is autonomous — ignore AI entirely and
-    // drop the FIRE level so a stale command can't hold the latch.
+    // In failsafe (offline) modes the ESP32 is autonomous — ignore AI and drop the FIRE
+    // level so a stale command can't hold the latch. Consume & discard to clear the flag.
     if (failsafe.getState() != FailsafeManager::STATE_NORMAL) {
+        mqttHandler.getLatestCommand();    // consume & discard
         aiFireActive = false;
         return;
     }
+
+    ActuatorCommand cmd = mqttHandler.getLatestCommand();   // consume
+    if (!cmd.isValid) return;
 
     // Track AI FIRE as a LEVEL — it feeds the unified latch (a sustained AI FIRE holds
     // suppression; updateFireAlarm() applies the 5s auto-shutoff once it clears).
     aiFireActive = (strcmp(cmd.state, "FIRE") == 0);
 
     // Non-FIRE AI states (SAFE / SENSOR_ALERT) are display/warning states: apply them
-    // live, but never override an active FIRE latch or a held manual button.
-    if (!aiFireActive && !fireAlarmActive && !manualAlarmActive) {
+    // live, but never override an active FIRE latch. (Manual/sensor already returned above.)
+    if (!aiFireActive && !fireAlarmActive) {
         actuators.applyCommands(cmd.gasValve, cmd.doors, cmd.pump1, cmd.pump2);
         actuators.applyState(cmd.state);   // LED color + buzzer pattern from state
         Serial.print("[AI CMD] Executed: State=");
@@ -201,17 +217,16 @@ void processAiCommands() {
 // ==========================================
 // Unified 5-Second FIRE Alarm Latch (non-blocking, level-based)
 // ==========================================
-// Fuses ALL emergency triggers and holds the FULL suppression set (valve CLOSE,
-// doors OPEN, both pumps ON, red LED, continuous buzzer) for ALARM_LATCH_MS:
-//   • Manual buttons (GPIO 16/17)      — held or pulsed
-//   • Local GAS/SMOKE (MQ, warm-up gated)
-//   • Local FLAME (IR, instant)
-//   • AI camera FIRE command
-// The 5s window REFRESHES every loop a trigger is active, so a SUSTAINED trigger
-// (held button / persistent gas / continuous AI FIRE) keeps suppression on, and a
-// fresh press restarts it. Exactly 5s after the LAST trigger clears → auto-SAFE.
-// While the failsafe is driving actuators (offline STANDALONE), this stands down so
-// the two mechanisms never fight.
+// Fuses the THREE FIRE tiers and holds the FULL suppression set (valve CLOSE, doors
+// OPEN, both pumps ON, red LED, continuous buzzer) for ALARM_LATCH_MS:
+//   • Tier 1 — manualAlarmActive     (buttons, held or pulsed)
+//   • Tier 2 — sensorEmergencyActive (local gas/smoke/flame — armed instantly upstream)
+//   • Tier 3 — aiFireActive          (AI camera FIRE command)
+// The 5s window REFRESHES every loop a trigger is active, so a SUSTAINED trigger keeps
+// suppression on and a fresh trigger restarts it. Exactly 5s after the LAST trigger
+// clears → auto-SAFE. (SENSOR_ALERT / high ambient temp is NOT a trigger here — it is a
+// warning state owned by the Python AI.) While the failsafe drives actuators (offline
+// STANDALONE), this stands down so the two mechanisms never fight.
 void updateFireAlarm() {
     if (failsafe.shouldActAutonomously()) {
         fireAlarmActive = false;
@@ -222,30 +237,26 @@ void updateFireAlarm() {
         aiFireActive = false;        // no live AI → a stale FIRE must not hold the latch
     }
 
-    // Level-based trigger fusion — ANY active source keeps the window open.
-    bool manualTrig = manualAlarmActive;                          // button(s) held
-    bool gasTrig    = sensors.isWarmedUp() && sensors.isGasDanger();
-    bool flameTrig  = sensors.isFlameDetected();                  // IR flame → FIRE (no warm-up)
-    bool triggerActive = manualTrig || gasTrig || flameTrig || aiFireActive;
+    // Level-based fusion of the three FIRE tiers — ANY active source keeps the window open.
+    bool triggerActive = manualAlarmActive || sensorEmergencyActive || aiFireActive;
 
     unsigned long now = millis();
 
     if (triggerActive) {
-        fireAlarmStart = now;                 // refresh while sustained / on each fresh press
+        fireAlarmStart = now;                 // refresh while sustained / on each fresh trigger
         if (!fireAlarmActive) {
             fireAlarmActive = true;
             actuators.setEmergency();         // valve CLOSE, doors OPEN, BOTH pumps ON, red LED, continuous buzzer
             Serial.print("[Alarm] 🔥 FIRE latch ARMED (5s) — src:");
-            Serial.print(manualTrig    ? "MANUAL " : "");
-            Serial.print(gasTrig       ? "GAS "    : "");
-            Serial.print(flameTrig     ? "FLAME "  : "");
-            Serial.println(aiFireActive ? "AI"     : "");
+            Serial.print(manualAlarmActive     ? "MANUAL " : "");
+            Serial.print(sensorEmergencyActive ? "SENSOR " : "");
+            Serial.println(aiFireActive        ? "AI"      : "");
         }
     } else if (fireAlarmActive && (now - fireAlarmStart >= ALARM_LATCH_MS)) {
         fireAlarmActive = false;
         actuators.setAllSafe();               // valve OPEN, doors CLOSE, pumps OFF, green ON, buzzer off
         publishSensorData();                  // tell the AI the node returned to SAFE
-        Serial.println("[Alarm] ⏱️ 5s elapsed, no active trigger → auto-shutoff. Returned to SAFE.");
+        Serial.println("[Alarm] ⏱️ 5s elapsed, all triggers clear → auto-shutoff. Returned to SAFE.");
     }
 }
 
@@ -451,4 +462,31 @@ void processManualButtons() {
 
     btn1WasPressed = btn1Now;
     btn2WasPressed = btn2Now;
+}
+
+// ==========================================
+// TIER 2: Local Sensor Emergency — gas/smoke/flame → INSTANT FIRE (bypasses AI)
+// ==========================================
+// Gas/smoke (MQ, warm-up gated) and flame (IR, instant) are treated as CONFIRMED fire
+// sources: they require NO AI camera validation. On the rising edge this arms the FIRE
+// latch IMMEDIATELY (actuators.setEmergency() in this same call), then sets the level
+// flag so updateFireAlarm() sustains it and applies the 5s auto-shutoff once it clears.
+// (High ambient temperature is deliberately NOT here — that is the Python AI's
+// SENSOR_ALERT warning state, never a local FIRE trigger.)
+void processSensorEmergency() {
+    bool gasSmoke = sensors.isWarmedUp() && sensors.isGasDanger();   // MQ-2/5/6/7 over threshold
+    bool flame    = sensors.isFlameDetected();                       // IR flame (no warm-up)
+
+    sensorEmergencyActive = gasSmoke || flame;
+
+    // Instant emergency on the rising edge — don't wait for the AI or even the latch
+    // tick. updateFireAlarm() then refreshes/auto-clears via the shared latch state.
+    if (sensorEmergencyActive && !fireAlarmActive) {
+        fireAlarmActive = true;
+        fireAlarmStart  = millis();
+        actuators.setEmergency();
+        Serial.print("[SENSOR] 🔥 Local emergency → INSTANT FIRE (AI bypassed) — src:");
+        Serial.print(gasSmoke ? "GAS/SMOKE " : "");
+        Serial.println(flame  ? "FLAME"      : "");
+    }
 }

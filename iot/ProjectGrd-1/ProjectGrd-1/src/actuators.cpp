@@ -16,17 +16,31 @@ void ActuatorController::begin(int buzzerPin,
     _ledOrangePin = ledOrangePin;
     _ledRedPin    = ledRedPin;
 
-    // ---- PCA9685 PWM servo driver (shared hardware I2C bus) ----
-    // Defensive: re-begin the bus here so the PCA9685 is guaranteed an initialised
-    // Wire BEFORE _pwm.begin(), regardless of call order in setup(). Bind the driver
-    // explicitly to Wire and follow the exact Adafruit init sequence.
+    // ---- PCA9685 PWM servo driver (shared hardware I2C bus) — HARDENED INIT ----
+    // Servo no-response fix: bring up the I2C master FIRST, PROBE the PCA9685 so a
+    // wiring/power fault is reported (instead of silently failing to a dead bus), then
+    // run the exact Adafruit bring-up sequence and let the prescaler settle BEFORE any
+    // angle is commanded by setAllSafe().
     Wire.begin(I2C_SDA, I2C_SCL);
     Wire.setClock(400000);                            // 400 kHz fast-mode I2C
+
+    // I2C presence probe: if this NACKs, the chip is unpowered or miswired and NO
+    // servo will ever move regardless of the PWM calls below — surface it loudly.
+    Wire.beginTransmission(PCA9685_I2C_ADDR);
+    if (Wire.endTransmission() != 0) {
+        Serial.println("[Actuators] ⚠️ PCA9685 NOT detected on I2C @0x" +
+                       String(PCA9685_I2C_ADDR, HEX) +
+                       " — check SDA=GPIO" + String(I2C_SDA) +
+                       "/SCL=GPIO" + String(I2C_SCL) +
+                       ", 3.3V logic VCC, AND the separate V+ servo supply.");
+    }
+
     _pwm = Adafruit_PWMServoDriver(PCA9685_I2C_ADDR, Wire);
     _pwm.begin();
     _pwm.setOscillatorFrequency(PCA9685_OSC_FREQ);    // 27 MHz internal osc (Adafruit calibration)
     _pwm.setPWMFreq(SERVO_PWM_FREQ);                  // 50 Hz analog-servo refresh
-    delay(10);                                        // let the prescaler/oscillator settle
+    Wire.setClock(400000);                            // re-assert: _pwm.begin() can reset Wire to 100 kHz
+    delay(10);                                        // let the prescaler/oscillator settle before first angle
 
     // Configure buzzer pin
     pinMode(_buzzerPin, OUTPUT);
@@ -44,9 +58,10 @@ void ActuatorController::begin(int buzzerPin,
     pinMode(_pump2Pin, OUTPUT);
     digitalWrite(_pump2Pin, HIGH);  // Pump 2 OFF at boot
 
-    // Configure status LED pins. Green is COMMON-ANODE (inverted): HIGH = OFF.
+    // Configure status LED pins. ALL THREE are ACTIVE-HIGH (Common-Cathode): HIGH = ON,
+    // LOW = OFF. (Green is NOT inverted — that assumption caused the Green+Red co-lit bug.)
     pinMode(_ledGreenPin, OUTPUT);
-    digitalWrite(_ledGreenPin, HIGH);   // green OFF at boot (inverted)
+    digitalWrite(_ledGreenPin, LOW);    // green OFF at boot (active-high)
     pinMode(_ledOrangePin, OUTPUT);
     digitalWrite(_ledOrangePin, LOW);
     pinMode(_ledRedPin, OUTPUT);
@@ -203,27 +218,24 @@ void ActuatorController::setPump2(const String& command) {
 // ==========================================
 
 void ActuatorController::setStatusLeds(const String& state) {
-    // EXCLUSIVE per-state drive: EVERY branch sets ALL THREE pins, so no colour can
-    // bleed into another (fixes the Green+Red co-activation seen in FIRE/MANUAL).
-    // ⚠️ Green LED (GPIO 18) is COMMON-ANODE / INVERTED: digitalWrite(HIGH) = OFF,
-    //    digitalWrite(LOW) = ON. Orange + Red are standard active-high (HIGH = ON).
+    // LEDs are confirmed Common-Cathode (ACTIVE-HIGH): HIGH = ON, LOW = OFF.
+    //
+    // STEP 1 — BLANK ALL THREE to LOW first. Wiping every colour before driving the new
+    //          one guarantees ABSOLUTE EXCLUSIVITY: no pin can bleed across a state
+    //          change (this is what kills the Green+Red co-activation).
+    digitalWrite(_ledGreenPin,  LOW);
+    digitalWrite(_ledOrangePin, LOW);
+    digitalWrite(_ledRedPin,    LOW);
+
+    // STEP 2 — drive EXACTLY ONE pin HIGH for the active state.
     if (state == "SAFE") {
-        digitalWrite(_ledGreenPin,  LOW);    // 🟢 green ON  (inverted: LOW = ON)
-        digitalWrite(_ledOrangePin, LOW);    // orange OFF
-        digitalWrite(_ledRedPin,    LOW);    // red OFF
+        digitalWrite(_ledGreenPin,  HIGH);   // 🟢 SAFE
     } else if (state == "SENSOR_ALERT") {
-        digitalWrite(_ledGreenPin,  HIGH);   // green OFF
-        digitalWrite(_ledOrangePin, HIGH);   // 🟠 orange ON
-        digitalWrite(_ledRedPin,    LOW);    // red OFF
+        digitalWrite(_ledOrangePin, HIGH);   // 🟠 high-temp early warning (from Python AI)
     } else if (state == "FIRE" || state == "MANUAL") {
-        digitalWrite(_ledGreenPin,  HIGH);   // green OFF — EXPLICITLY driven HIGH (no bleed into red)
-        digitalWrite(_ledOrangePin, LOW);    // orange OFF
-        digitalWrite(_ledRedPin,    HIGH);   // 🔴 red ON
-    } else {
-        digitalWrite(_ledGreenPin,  HIGH);   // unknown/empty → all OFF (fail-dark)
-        digitalWrite(_ledOrangePin, LOW);
-        digitalWrite(_ledRedPin,    LOW);
+        digitalWrite(_ledRedPin,    HIGH);   // 🔴 confirmed emergency
     }
+    // else (unknown/empty): all three stay LOW → fail-dark.
 }
 
 // ==========================================

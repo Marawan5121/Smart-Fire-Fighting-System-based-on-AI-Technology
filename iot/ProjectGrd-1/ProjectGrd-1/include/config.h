@@ -74,8 +74,8 @@
 #define PUMP1_PIN        5     // Water pump 1 relay (Active LOW)
 #define PUMP2_PIN        23    // Water pump 2 relay (Active LOW)
 
-// --- Status Indicator LEDs ---
-#define LED_GREEN_PIN    18    // Green LED (SAFE) — on a freed servo pin (servos now on PCA9685)
+// --- Status Indicator LEDs (ALL active-HIGH / Common-Cathode: HIGH = ON, LOW = OFF) ---
+#define LED_GREEN_PIN    18    // Green LED (SAFE) — active-HIGH, on a freed servo pin (servos now on PCA9685)
 #define LED_ORANGE_PIN   14    // Orange LED (SENSOR_ALERT — sensor early warning)
 #define LED_RED_PIN      25    // Red LED    (FIRE / MANUAL — confirmed emergency)
 

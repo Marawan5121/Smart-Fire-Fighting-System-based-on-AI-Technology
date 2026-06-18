@@ -61,51 +61,81 @@ This is the rail that the main supply must size for. The table below is the **wo
 
 For reference, the **SAFE (idle) continuous** load — servos holding at rest, pumps off, buzzer off, green LED on — is dominated by the always-on gas heaters:
 
-```
-SAFE ≈ MQ 600 + ESP32 120 + servos hold (9×10) 90 + flame 60
-       + LED 20 + PCA 10 + HC-SR04 2 + DHT 2 ≈ 904 mA ≈ 0.9 A continuous
+```mermaid
+graph LR
+    subgraph SAFE_Load ["SAFE Idle Continuous — 0.90 A"]
+        MQ["MQ gas heaters<br/>4 × 150 mA = 600 mA"]
+        ESP["ESP32 (idle)<br/>120 mA"]
+        SV["Servos hold<br/>9 × 10 mA = 90 mA"]
+        FL["IR flame modules<br/>4 × 15 mA = 60 mA"]
+        LED["Green LED<br/>20 mA"]
+        PCA["PCA9685 logic<br/>10 mA"]
+        US["HC-SR04<br/>2 mA"]
+        DH["DHT22<br/>2 mA"]
+    end
+
+    MQ --> SUM["≈ 904 mA"]
+    ESP --> SUM
+    SV --> SUM
+    FL --> SUM
+    LED --> SUM
+    PCA --> SUM
+    US --> SUM
+    DH --> SUM
 ```
 
 ---
 
 ## 4. Mathematical Validation — 5 V / 5 A Supply Selection
 
-**Worst-case operational load (§3):**
+### Worst-Case Operational Load
 
-```
-I_load = 4.109 A
-```
-
-**Engineering safety margin (20 %):**
-
-```
-I_required = I_load × 1.20 = 4.109 A × 1.20 = 4.93 A
-```
-
-**Supply selection:**
-
-```
-Selected: 5 V / 5 A regulated switching supply (25 W)
-Headroom: (5.0 − 4.109) / 4.109 = 21.7 %  ≥ 20 %   ✓ PASS
+```mermaid
+flowchart LR
+    LOAD["I_load = 4.109 A"] --> MARGIN["× 1.20 safety margin"]
+    MARGIN --> REQ["I_required = 4.93 A"]
+    REQ --> SEL["Selected: 5 V / 5 A<br/>regulated switching supply<br/>(25 W)"]
+    SEL --> CHECK{"Headroom<br/>(5.0 − 4.109) / 4.109<br/>= 21.7 % ≥ 20 %?"}
+    CHECK -- Yes --> PASS["✓ PASS"]
+    CHECK -- No --> FAIL["✗ FAIL"]
 ```
 
 A 5 V / 5 A supply satisfies the worst-case concurrent operational draw with the required ≥ 20 % margin. A 3 A supply (the original two-servo design point) is rejected: at 4.11 A operational it would be in 137 % overload.
 
-**Transient / stall ceiling.** The absolute fault ceiling — all nine servos stalling at once — is bounded but exceeds the supply:
+### Transient / Stall Ceiling
 
+The absolute fault ceiling — all nine servos stalling at once — is bounded but exceeds the supply:
+
+```mermaid
+flowchart LR
+    SSTALL["Servo stall<br/>9 × 650 mA (SG90)<br/>= 5.85 A"] --> PEAK["I_peak_fault"]
+    PUMPS["Pumps<br/>0.88 A"] --> PEAK
+    HEAT["Heaters<br/>0.60 A"] --> PEAK
+    ESP["ESP32<br/>0.24 A"] --> PEAK
+    MISC["Misc<br/>0.14 A"] --> PEAK
+    PEAK --> TOTAL["≈ 7.71 A"]
 ```
-I_stall(servos) = 9 × 650 mA (SG90) ≈ 5.85 A
-I_peak_fault ≈ 5.85 + pumps 0.88 + heaters 0.6 + ESP32 0.24 + misc 0.14 ≈ 7.71 A
-```
 
-This condition is not a steady-state design point and is mitigated structurally rather than by oversizing the supply:
+> [!WARNING]
+> **9-servo stall current ceiling.** The absolute fault ceiling of ~7.71 A exceeds the 5 A supply rating. This condition is not a steady-state design point and is mitigated structurally rather than by oversizing the supply. A higher-rated supply (e.g., 5 V / 8 A) would remove the dependence on bulk capacitance for stall inrush and is the recommended upgrade if MG995-class metal-gear servos replace the SG90-class units.
 
-1. Servos reach commanded position in < 0.5 s, so simultaneous draw is a sub-second inrush, not a sustained load.
-2. A bulk electrolytic capacitor (≥ 2200 µF) across the V+ rail at the PCA9685 sources the inrush, holding rail voltage above the brown-out threshold.
-3. The edge-cached control law issues a servo write only on a state change, so the worst case occurs at most once per fire transition, never repetitively.
-4. Mechanical design prevents a continuously stalled servo (no actuator is driven against a hard stop at its commanded endpoint).
+> [!NOTE]
+> **Bulk capacitor inrush mitigation.** A bulk electrolytic capacitor (≥ 2200 µF) across the V+ rail at the PCA9685 sources the inrush, holding rail voltage above the brown-out threshold. The edge-cached control law issues a servo write only on a state change, so the worst case occurs at most once per fire transition, never repetitively. Mechanical design prevents a continuously stalled servo (no actuator is driven against a hard stop at its commanded endpoint).
 
-A higher-rated supply (e.g., 5 V / 8 A) would remove the dependence on bulk capacitance for stall inrush and is the recommended upgrade if MG995-class metal-gear servos (900–1200 mA stall) replace the SG90-class units; under MG995 stall the fault ceiling rises to ≈ 11–12 A and capacitor sizing must be re-evaluated.
+> [!WARNING]
+> **MG995 upgrade consideration.** Under MG995-class metal-gear servos (900–1200 mA stall per unit), the fault ceiling rises to ≈ 11–12 A. Capacitor sizing must be re-evaluated if upgrading from SG90-class units.
+
+### Mitigation Architecture
+
+The stall condition is addressed through four structural mechanisms:
+
+1. **Transient duration.** Servos reach commanded position in < 0.5 s, so simultaneous draw is a sub-second inrush, not a sustained load.
+
+2. **Bulk capacitance.** A bulk electrolytic capacitor (≥ 2200 µF) across the V+ rail at the PCA9685 sources the inrush, holding rail voltage above the brown-out threshold.
+
+3. **Edge-cached control law.** The control law issues a servo write only on a state change, so the worst case occurs at most once per fire transition, never repetitively.
+
+4. **Mechanical design.** No actuator is driven against a hard stop at its commanded endpoint, preventing a continuously stalled servo.
 
 ---
 

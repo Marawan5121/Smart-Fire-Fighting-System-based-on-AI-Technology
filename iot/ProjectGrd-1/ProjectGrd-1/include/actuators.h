@@ -3,100 +3,56 @@
 
 #include <Arduino.h>
 #include <Adafruit_PWMServoDriver.h>
-
-/** @brief Buzzer drive patterns, selected by system state (non-blocking). */
-enum BuzzerMode {
-    BUZZER_MODE_OFF,          // silent (SAFE)
-    BUZZER_MODE_INTERMITTENT, // periodic beep (SENSOR_ALERT)
-    BUZZER_MODE_CONTINUOUS    // solid tone (FIRE / MANUAL)
-};
+#include "config.h"
 
 /**
- * @brief Controls all physical actuators: 2x SG90 servos (gas valve, doors) on a
- * PCA9685 PWM driver, an active buzzer, 2x relay-controlled water pumps, and 3x
- * status indicator LEDs. Provides a clean command interface matching the MQTT schema.
+ * @brief Drives all physical actuators for the 4-room zonal suppression system:
+ * 9 servos (gas valve, 4 room doors, 2 corridors, 2 windows) on a PCA9685, an
+ * active buzzer, 4 relay-controlled water pumps, and 2 status LEDs.
+ *
+ * Every write is EDGE-TRACKED: setters cache the last value and only touch the
+ * I2C bus / GPIO when the value actually changes. This makes it safe to call the
+ * full state every loop and prevents PCA9685 chatter / relay brown-out.
  */
 class ActuatorController {
 private:
-    Adafruit_PWMServoDriver _pwm;   // 2 servos on channels 0-1 (I2C @ 0x40)
+    Adafruit_PWMServoDriver _pwm;   // 9 servos on channels 0-8 (I2C @ 0x40)
 
-    int _buzzerPin;
-    int _pump1Pin;
-    int _pump2Pin;
-    int _ledGreenPin;
-    int _ledOrangePin;
-    int _ledRedPin;
+    int _pumpPins[ROOM_COUNT];
 
-    // Current actuator states (for telemetry reporting)
-    bool _gasValveOpen;
-    bool _doorOpen;
-    bool _buzzerActive;
-    bool _pump1Active;
-    bool _pump2Active;
+    // Edge-tracking caches (-1 / impossible value forces the first write).
+    int  _servoAngle[9];
+    bool _pumpState[ROOM_COUNT];
+    int  _ledGreenState;
+    int  _ledRedState;
+    int  _buzzerState;
 
-    // Non-blocking buzzer pattern state
-    BuzzerMode    _buzzerMode;
-    unsigned long _buzzerLastToggle;
-    bool          _buzzerPinState;
-
-    /** @brief Drive one PCA9685 servo channel to an angle (0-180°). */
+    /** @brief Drive one PCA9685 channel to an angle (0-180 deg), write-on-change. */
     void setServoAngle(uint8_t channel, int angle);
 
 public:
     ActuatorController();
 
-    /** @brief Init PCA9685 (servos ch 0-1) + configure buzzer/pump/LED pins.
-     *  Servos are on I2C, so no servo GPIOs are passed. */
-    void begin(int buzzerPin,
-               int pump1Pin, int pump2Pin,
-               int ledGreenPin, int ledOrangePin, int ledRedPin);
+    /** @brief Init PCA9685, buzzer, 4 pump relays, and 2 LEDs; leave hardware SAFE. */
+    void begin();
 
-    // ---- Gas Valve Servo ----
-    void openGasValve();
-    void closeGasValve();
-    void setGasValve(const String& command);
+    // ---- Servo groups (boolean, level-driven) ----
+    void setGasValve(bool emergency);              // emergency -> CLOSED(180), else OPEN(0)
+    void setRoomDoor(uint8_t roomIdx, bool open);  // roomIdx 0-3 -> ch 1-4
+    void setCorridors(bool open);                  // ch 5 & 6 together
+    void setRoomWindow(uint8_t roomIdx, bool fire);// roomIdx 2|3 -> ch 7|8; fire -> CLOSED(0)
 
-    // ---- Door/Window Servo ----
-    void openDoors();
-    void closeDoors();
-    void setDoors(const String& command);
+    // ---- Pumps (Active-LOW relay) ----
+    void setPump(uint8_t roomIdx, bool on);
+    bool isPumpActive(uint8_t roomIdx) const;
+    bool anyPumpActive() const;
 
-    // ---- Buzzer ----
-    void buzzerOn();                       // → continuous mode
-    void buzzerOff();                      // → off mode
-    void setBuzzerMode(BuzzerMode mode);   // select OFF / INTERMITTENT / CONTINUOUS
-    void updateBuzzer();                   // tick the pattern; call every loop()
+    // ---- LEDs & Buzzer ----
+    void setLeds(bool fire);    // fire -> RED on / GREEN off; else GREEN on / RED off
+    void setBuzzer(bool on);    // continuous tone while true
 
-    // ---- Water Pumps (Active LOW relay) ----
-    void pump1On();
-    void pump1Off();
-    void setPump1(const String& command);
-    void pump2On();
-    void pump2Off();
-    void setPump2(const String& command);
-
-    // ---- Status LEDs ----
-    /** @brief Set LEDs by system state: "SAFE"(🟢) "SENSOR_ALERT"(🟠) "FIRE"/"MANUAL"(🔴) */
-    void setStatusLeds(const String& state);
-
-    // ---- Batch Command (mechanical actuators only) ----
-    /** @brief Apply valve/door/pump commands. LED + buzzer come from applyState(). */
-    void applyCommands(const String& gasValve, const String& doors,
-                       const String& pump1, const String& pump2);
-
-    /** @brief Drive LED color + buzzer pattern from the fused system state. */
-    void applyState(const String& state);
-
-    // ---- Safe Defaults ----
-    void setAllSafe();
-    void setEmergency();
-
-    // ---- Status Getters ----
-    bool isGasValveOpen() const { return _gasValveOpen; }
-    bool isDoorOpen() const { return _doorOpen; }
-    bool isBuzzerActive() const { return _buzzerActive; }
-    bool isPump1Active() const { return _pump1Active; }
-    bool isPump2Active() const { return _pump2Active; }
+    // ---- Safe defaults ----
+    void setSafeDefaults();
 };
 
 #endif // ACTUATORS_H

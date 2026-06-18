@@ -6,24 +6,20 @@
 #include "filters.h"
 
 /**
- * @brief Manages all physical sensor inputs: 4x MQ gas sensors (with EMA filtering),
- * IR flame sensor, DHT22 (temp/humidity), and HC-SR04 water level.
+ * @brief Manages all physical sensor inputs: 4x MQ gas sensors (one per room,
+ * EMA-filtered), an IR flame sensor (active-LOW), a DHT22 (temp/humidity),
+ * an HC-SR04 water-level sensor, and 4 manual alarm push buttons.
  */
 class SensorsManager {
 private:
-    // EMA Filter Instances for each MQ Gas Sensor
+    // Per-room MQ gas sensors + EMA filters
     EmaFilter _mq2Filter;
     EmaFilter _mq5Filter;
     EmaFilter _mq6Filter;
     EmaFilter _mq7Filter;
+    float _filteredGas[4];      // [0]=Room1 MQ2 .. [3]=Room4 MQ7
 
-    // Filtered gas values
-    float _filteredGas1;
-    float _filteredGas2;
-    float _filteredGas3;
-    float _filteredGas4;
-
-    // DHT22 Environmental readings
+    // DHT22 environmental readings
     DHT _dht;
     float _ambientTemp;
     float _ambientHum;
@@ -36,55 +32,47 @@ private:
     bool _isWarmedUp;
     unsigned long _bootTime;
 
-    // Ultrasonic Water Level (HC-SR04)
+    // Ultrasonic water level (HC-SR04)
     EmaFilter _waterFilter;
     float _waterDistanceCm;
     float _waterLevelPct;
     unsigned long _lastUltrasonicRead;
 
-    // Manual Alarm Push Buttons
-    bool _button1Pressed;
-    bool _button2Pressed;
-    unsigned long _btn1LastDebounce;
-    unsigned long _btn2LastDebounce;
-    bool _btn1LastState;
-    bool _btn2LastState;
+    // Manual alarm buttons (one per room)
+    bool _buttonPressed[4];
+    unsigned long _btnLastDebounce[4];
+    bool _btnLastState[4];
 
 public:
     SensorsManager();
 
-    /** @brief Configure all sensor pins, I2C, and peripherals */
     void begin();
-
-    /** @brief Read and filter all sensors. Call every loop iteration. */
     void update();
 
-    // ---- Filtered Gas Getters ----
-    float getGas1() const { return _filteredGas1; }
-    float getGas2() const { return _filteredGas2; }
-    float getGas3() const { return _filteredGas3; }
-    float getGas4() const { return _filteredGas4; }
-    bool isGasDanger() const;
+    // ---- Per-room gas getters (index 0-3) ----
+    float getGas(uint8_t roomIdx) const { return (roomIdx < 4) ? _filteredGas[roomIdx] : 0.0f; }
 
-    // ---- Environmental Getters ----
+    // ---- Environmental getters ----
     float getTemperature() const { return _ambientTemp; }
     float getHumidity() const { return _ambientHum; }
-    float getInternalTemp();
 
-    // ---- Flame Getter ----
+    // ---- Flame getter (true while IR sensor reads LOW) ----
     bool isFlameDetected() const { return _flameDetected; }
 
-    // ---- System Status ----
+    // ---- System status ----
     bool isWarmedUp() const { return _isWarmedUp; }
     unsigned long getWarmupTimeRemaining() const;
 
-    // ---- Water Level Getters ----
+    // ---- Water level getters ----
     float getWaterLevelPct() const { return _waterLevelPct; }
     float getWaterDistanceCm() const { return _waterDistanceCm; }
 
-    // ---- Manual Alarm Button Getters ----
-    bool isButton1Pressed() const { return _button1Pressed; }
-    bool isButton2Pressed() const { return _button2Pressed; }
+    // ---- Manual alarm button getters (index 0-3) ----
+    bool isButtonPressed(uint8_t roomIdx) const { return (roomIdx < 4) && _buttonPressed[roomIdx]; }
+    bool anyButtonPressed() const {
+        for (int i = 0; i < 4; i++) if (_buttonPressed[i]) return true;
+        return false;
+    }
 };
 
 #endif // SENSORS_H

@@ -7,159 +7,109 @@ SensorsManager::SensorsManager()
       _mq6Filter(EMA_ALPHA),
       _mq7Filter(EMA_ALPHA),
       _dht(DHT_PIN, DHT22),
-      _filteredGas1(0), _filteredGas2(0), _filteredGas3(0), _filteredGas4(0),
       _ambientTemp(0), _ambientHum(0), _lastDhtRead(0),
       _flameDetected(false), _isWarmedUp(false), _bootTime(0),
-      _waterFilter(EMA_ALPHA), _waterDistanceCm(0), _waterLevelPct(0), _lastUltrasonicRead(0),
-      _button1Pressed(false), _button2Pressed(false),
-      _btn1LastDebounce(0), _btn2LastDebounce(0),
-      _btn1LastState(false), _btn2LastState(false) {}
+      _waterFilter(EMA_ALPHA), _waterDistanceCm(0), _waterLevelPct(0), _lastUltrasonicRead(0) {
+    for (int i = 0; i < 4; i++) {
+        _filteredGas[i]    = 0;
+        _buttonPressed[i]  = false;
+        _btnLastDebounce[i] = 0;
+        _btnLastState[i]   = false;
+    }
+}
 
 void SensorsManager::begin() {
     _bootTime = millis();
 
-    // Configure analog input pins (MQ sensors)
+    // MQ gas sensors (analog inputs)
     pinMode(GAS1_PIN, INPUT);
     pinMode(GAS2_PIN, INPUT);
     pinMode(GAS3_PIN, INPUT);
     pinMode(GAS4_PIN, INPUT);
 
-    // Configure digital input pin (flame sensor)
-    pinMode(FLAME_PIN, INPUT);
+    // IR flame sensor: INPUT_PULLUP, active-LOW (digitalRead == LOW means fire).
+    pinMode(FLAME_PIN, INPUT_PULLUP);
 
-    // Initialize DHT22
     _dht.begin();
     Serial.println("[Sensors] DHT22 initialized on GPIO" + String(DHT_PIN));
 
-    // (MPU6050 removed — the I2C bus is owned exclusively by the PCA9685, which is
-    //  initialised in ActuatorController::begin().)
-
-    // Configure ultrasonic pins
+    // Ultrasonic water level
     pinMode(ULTRASONIC_TRIG_PIN, OUTPUT);
     pinMode(ULTRASONIC_ECHO_PIN, INPUT);
     digitalWrite(ULTRASONIC_TRIG_PIN, LOW);
-    Serial.println("[Sensors] HC-SR04 ultrasonic initialized (TRIG:GPIO" + String(ULTRASONIC_TRIG_PIN) + " ECHO:GPIO" + String(ULTRASONIC_ECHO_PIN) + ")");
+    Serial.println("[Sensors] HC-SR04 initialized (TRIG:GPIO" + String(ULTRASONIC_TRIG_PIN) +
+                   " ECHO:GPIO" + String(ULTRASONIC_ECHO_PIN) + ")");
 
-    // Configure button pins (GPIO 16/17, reclaimed from the removed SIM800L UART2).
-    // Both use the internal pulldown → active-HIGH, no external resistor needed.
-    pinMode(BUTTON1_PIN, INPUT_PULLDOWN);  // GPIO 16
-    pinMode(BUTTON2_PIN, INPUT_PULLDOWN);  // GPIO 17
-    Serial.println("[Sensors] Manual alarm buttons initialized (BTN1:GPIO" + String(BUTTON1_PIN) + " BTN2:GPIO" + String(BUTTON2_PIN) + ")");
+    // Manual alarm buttons (INPUT_PULLDOWN, active-HIGH)
+    pinMode(BUTTON1_PIN, INPUT_PULLDOWN);
+    pinMode(BUTTON2_PIN, INPUT_PULLDOWN);
+    pinMode(BUTTON3_PIN, INPUT_PULLDOWN);
+    pinMode(BUTTON4_PIN, INPUT_PULLDOWN);
+    Serial.println("[Sensors] 4 manual alarm buttons initialized (GPIO" +
+                   String(BUTTON1_PIN) + "/" + String(BUTTON2_PIN) + "/" +
+                   String(BUTTON3_PIN) + "/" + String(BUTTON4_PIN) + ")");
 
-    Serial.println("[Sensors] All sensors configured. Warm-up period started ("
-                   + String(SENSOR_WARMUP_MS / 1000) + "s)...");
+    Serial.println("[Sensors] Configured. Warm-up started (" +
+                   String(SENSOR_WARMUP_MS / 1000) + "s)...");
 }
 
 void SensorsManager::update() {
-    // ==========================================
-    // 1. Read and Filter MQ Gas Sensors
-    // ==========================================
-    float rawGas1 = (float)analogRead(GAS1_PIN);
-    float rawGas2 = (float)analogRead(GAS2_PIN);
-    float rawGas3 = (float)analogRead(GAS3_PIN);
-    float rawGas4 = (float)analogRead(GAS4_PIN);
+    // 1. Read + filter the four MQ gas sensors (one per room)
+    _filteredGas[0] = _mq2Filter.filter((float)analogRead(GAS1_PIN));
+    _filteredGas[1] = _mq5Filter.filter((float)analogRead(GAS2_PIN));
+    _filteredGas[2] = _mq6Filter.filter((float)analogRead(GAS3_PIN));
+    _filteredGas[3] = _mq7Filter.filter((float)analogRead(GAS4_PIN));
 
-    _filteredGas1 = _mq2Filter.filter(rawGas1);
-    _filteredGas2 = _mq5Filter.filter(rawGas2);
-    _filteredGas3 = _mq6Filter.filter(rawGas3);
-    _filteredGas4 = _mq7Filter.filter(rawGas4);
+    // 2. Flame sensor (active-LOW)
+    _flameDetected = (digitalRead(FLAME_PIN) == HIGH);
 
-    // ==========================================
-    // 2. Read Flame Sensor (Active LOW)
-    // ==========================================
-    _flameDetected = (digitalRead(FLAME_PIN) == LOW);
-
-    // ==========================================
-    // 3. Read DHT22 (rate-limited to every 2 seconds by hardware)
-    // ==========================================
+    // 3. DHT22 (rate-limited to 2s; can return NaN)
     if (millis() - _lastDhtRead >= 2000) {
-        float tempReading = _dht.readTemperature();
-        float humReading  = _dht.readHumidity();
-
-        // Only update if readings are valid (DHT22 can return NaN)
-        if (!isnan(tempReading)) {
-            _ambientTemp = tempReading;
-        }
-        if (!isnan(humReading)) {
-            _ambientHum = humReading;
-        }
+        float t = _dht.readTemperature();
+        float h = _dht.readHumidity();
+        if (!isnan(t)) _ambientTemp = t;
+        if (!isnan(h)) _ambientHum  = h;
         _lastDhtRead = millis();
     }
 
-    // ==========================================
-    // 4. Warm-up Monitoring
-    // ==========================================
-    if (!_isWarmedUp) {
-        if (millis() - _bootTime >= SENSOR_WARMUP_MS) {
-            _isWarmedUp = true;
-            Serial.println("[Sensors] Warm-up complete! All sensor readings stabilized.");
-        }
+    // 4. Warm-up gate
+    if (!_isWarmedUp && (millis() - _bootTime >= SENSOR_WARMUP_MS)) {
+        _isWarmedUp = true;
+        Serial.println("[Sensors] Warm-up complete. Gas readings stabilized.");
     }
 
-    // ==========================================
-    // 5. Read HC-SR04 Ultrasonic Water Level
-    // ==========================================
+    // 5. HC-SR04 water level
     if (millis() - _lastUltrasonicRead >= ULTRASONIC_READ_INTERVAL_MS) {
         _lastUltrasonicRead = millis();
 
-        // Send 10µs trigger pulse
         digitalWrite(ULTRASONIC_TRIG_PIN, LOW);
         delayMicroseconds(2);
         digitalWrite(ULTRASONIC_TRIG_PIN, HIGH);
         delayMicroseconds(10);
         digitalWrite(ULTRASONIC_TRIG_PIN, LOW);
 
-        // Measure echo pulse duration. B5: bounded timeout so an unplugged or
-        // silent HC-SR04 cannot stall the loop — pulseIn returns 0 after the cap.
         long duration = pulseIn(ULTRASONIC_ECHO_PIN, HIGH, ULTRASONIC_TIMEOUT_US);
-
         if (duration > 0) {
-            // Speed of sound: 343 m/s = 0.0343 cm/µs
-            // Distance = (duration × 0.0343) / 2
-            float rawDistance = (duration * 0.0343f) / 2.0f;
-            float filteredDistance = _waterFilter.filter(rawDistance);
-            _waterDistanceCm = filteredDistance;
-
-            // Calculate water level percentage
-            float level = ((TANK_HEIGHT_CM - filteredDistance) / TANK_HEIGHT_CM) * 100.0f;
+            float rawDistance = (duration * 0.0343f) / 2.0f;   // 343 m/s
+            _waterDistanceCm = _waterFilter.filter(rawDistance);
+            float level = ((TANK_HEIGHT_CM - _waterDistanceCm) / TANK_HEIGHT_CM) * 100.0f;
             _waterLevelPct = constrain(level, 0.0f, 100.0f);
         }
-        // If duration == 0 (timeout), keep last valid reading
+        // timeout (duration == 0): keep last valid reading
     }
 
-    // ==========================================
-    // 6. Read Manual Alarm Buttons (Debounced)
-    // ==========================================
-    bool btn1Raw = (digitalRead(BUTTON1_PIN) == HIGH);
-    bool btn2Raw = (digitalRead(BUTTON2_PIN) == HIGH);
-
-    if (btn1Raw != _btn1LastState) {
-        _btn1LastDebounce = millis();
-        _btn1LastState = btn1Raw;
+    // 6. Manual alarm buttons (debounced)
+    const int btnPins[4] = { BUTTON1_PIN, BUTTON2_PIN, BUTTON3_PIN, BUTTON4_PIN };
+    for (int i = 0; i < 4; i++) {
+        bool raw = (digitalRead(btnPins[i]) == HIGH);
+        if (raw != _btnLastState[i]) {
+            _btnLastDebounce[i] = millis();
+            _btnLastState[i] = raw;
+        }
+        if (millis() - _btnLastDebounce[i] >= BUTTON_DEBOUNCE_MS) {
+            _buttonPressed[i] = _btnLastState[i];
+        }
     }
-    if (millis() - _btn1LastDebounce >= BUTTON_DEBOUNCE_MS) {
-        _button1Pressed = _btn1LastState;
-    }
-
-    if (btn2Raw != _btn2LastState) {
-        _btn2LastDebounce = millis();
-        _btn2LastState = btn2Raw;
-    }
-    if (millis() - _btn2LastDebounce >= BUTTON_DEBOUNCE_MS) {
-        _button2Pressed = _btn2LastState;
-    }
-}
-
-bool SensorsManager::isGasDanger() const {
-    if (!_isWarmedUp) return false;
-    return (_filteredGas1 > GAS_THRESHOLD ||
-            _filteredGas2 > GAS_THRESHOLD ||
-            _filteredGas3 > GAS_THRESHOLD ||
-            _filteredGas4 > GAS_THRESHOLD);
-}
-
-float SensorsManager::getInternalTemp() {
-    return temperatureRead();  // ESP32 internal chip temperature
 }
 
 unsigned long SensorsManager::getWarmupTimeRemaining() const {

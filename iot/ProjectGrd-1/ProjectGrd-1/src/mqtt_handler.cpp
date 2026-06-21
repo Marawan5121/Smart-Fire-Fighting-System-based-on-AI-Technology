@@ -126,11 +126,14 @@ void MqttHandler::publishSensorData(float gas1, float gas2, float gas3, float ga
     JsonDocument doc;
     doc["ts"] = (unsigned long)(millis() / 1000);
 
+    // gas1..gas4 are Room1..Room4 readings; key each by the sensor physically in
+    // that room (bench-locked): R1=MQ-7(CO) R2=MQ-6 R3=MQ-5 R4=MQ-2(smoke). The
+    // key set is unchanged, so downstream parsers (Node-RED / AI) are unaffected.
     JsonObject gas = doc["gas"].to<JsonObject>();
-    gas["mq2"] = (int)gas1;
-    gas["mq5"] = (int)gas2;
-    gas["mq6"] = (int)gas3;
-    gas["mq7"] = (int)gas4;
+    gas["mq7"] = (int)gas1;   // Room 1 (CO)
+    gas["mq6"] = (int)gas2;   // Room 2
+    gas["mq5"] = (int)gas3;   // Room 3
+    gas["mq2"] = (int)gas4;   // Room 4 (smoke)
 
     JsonObject env = doc["env"].to<JsonObject>();
     env["temp"] = temp;

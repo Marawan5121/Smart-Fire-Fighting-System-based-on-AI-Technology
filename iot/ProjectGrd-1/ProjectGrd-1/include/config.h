@@ -47,10 +47,12 @@
 // ==========================================
 
 // --- Analog Inputs (MQ Gas Sensors), one per room -- ADC1 only ---
-#define GAS1_PIN         32    // MQ-2 (Room 1) - ADC1_CH4
-#define GAS2_PIN         33    // MQ-5 (Room 2) - ADC1_CH5
-#define GAS3_PIN         34    // MQ-6 (Room 3) - ADC1_CH6 (input-only)
-#define GAS4_PIN         35    // MQ-7 (Room 4) - ADC1_CH7 (input-only)
+// Physical deployment (bench-locked): each room's gas index points to the GPIO
+// of the MQ sensor installed in that room; each MQ keeps its canonical ADC pin.
+#define GAS1_PIN         35    // Room 1: MQ-7  (CO)                - ADC1_CH7 (input-only)
+#define GAS2_PIN         34    // Room 2: MQ-6  (isobutane/propane) - ADC1_CH6 (input-only)
+#define GAS3_PIN         33    // Room 3: MQ-5  (natural gas / CH4) - ADC1_CH5
+#define GAS4_PIN         32    // Room 4: MQ-2  (smoke / LPG / H2)  - ADC1_CH4
 
 // --- Digital Inputs ---
 #define FLAME_PIN        27    // IR flame sensor: INPUT_PULLUP, active-LOW (LOW = fire)

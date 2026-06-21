@@ -1,16 +1,3 @@
-/**
- * ============================================================
- * Smart Fire Fighting System (SFFS) -- ESP32 Firmware
- * 4-Room Zonal Suppression (9 servos) | Classic ESP32 WROOM-32
- * ------------------------------------------------------------
- * Control model: pure, level-driven real-time state synchronization.
- *   - Each room's fire status = its button OR its MQ gas sensor.
- *   - Local flame sensor (active-LOW) or AI "FIRE" command -> ALL rooms fire.
- *   - Hardware is written only when the fused command changes (edge-tracked),
- *     preventing PCA9685 chatter / relay brown-out.
- * ============================================================
- */
-
 #include <Arduino.h>
 #include <string.h>
 #include "config.h"

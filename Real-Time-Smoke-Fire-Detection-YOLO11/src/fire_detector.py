@@ -42,8 +42,8 @@ class Detector:
         device: str = "cpu",
         imgsz: int = 640,
         iou_threshold: float = 0.2,
-        min_confidence: float = 0.5,
-        smoke_confidence: float = 0.75,
+        min_confidence: float = 0.68,
+        smoke_confidence: float = 0.82,
     ):
         """
         Args:

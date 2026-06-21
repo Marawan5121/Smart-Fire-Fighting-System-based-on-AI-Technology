@@ -12,12 +12,12 @@
  */
 class SensorsManager {
 private:
-    // Per-room MQ gas sensors + EMA filters
-    EmaFilter _mq2Filter;
-    EmaFilter _mq5Filter;
-    EmaFilter _mq6Filter;
-    EmaFilter _mq7Filter;
-    float _filteredGas[4];      // [0]=Room1 MQ2 .. [3]=Room4 MQ7
+    // Per-room MQ gas sensors + EMA filters (filters are per-room slots)
+    EmaFilter _gasFilter1;      // Room 1
+    EmaFilter _gasFilter2;      // Room 2
+    EmaFilter _gasFilter3;      // Room 3
+    EmaFilter _gasFilter4;      // Room 4
+    float _filteredGas[4];      // [0]=Room1 MQ-7(CO) .. [3]=Room4 MQ-2(smoke)
 
     // DHT22 environmental readings
     DHT _dht;

@@ -2,10 +2,10 @@
 #include "config.h"
 
 SensorsManager::SensorsManager()
-    : _mq2Filter(EMA_ALPHA),
-      _mq5Filter(EMA_ALPHA),
-      _mq6Filter(EMA_ALPHA),
-      _mq7Filter(EMA_ALPHA),
+    : _gasFilter1(EMA_ALPHA),
+      _gasFilter2(EMA_ALPHA),
+      _gasFilter3(EMA_ALPHA),
+      _gasFilter4(EMA_ALPHA),
       _dht(DHT_PIN, DHT22),
       _ambientTemp(0), _ambientHum(0), _lastDhtRead(0),
       _flameDetected(false), _isWarmedUp(false), _bootTime(0),
@@ -54,11 +54,12 @@ void SensorsManager::begin() {
 }
 
 void SensorsManager::update() {
-    // 1. Read + filter the four MQ gas sensors (one per room)
-    _filteredGas[0] = _mq2Filter.filter((float)analogRead(GAS1_PIN));
-    _filteredGas[1] = _mq5Filter.filter((float)analogRead(GAS2_PIN));
-    _filteredGas[2] = _mq6Filter.filter((float)analogRead(GAS3_PIN));
-    _filteredGas[3] = _mq7Filter.filter((float)analogRead(GAS4_PIN));
+    // 1. Read + filter the four MQ gas sensors (one per room).
+    //    Room->sensor (bench-locked): R1=MQ-7(CO) R2=MQ-6 R3=MQ-5 R4=MQ-2(smoke)
+    _filteredGas[0] = _gasFilter1.filter((float)analogRead(GAS1_PIN));  // Room 1: MQ-7 (CO)
+    _filteredGas[1] = _gasFilter2.filter((float)analogRead(GAS2_PIN));  // Room 2: MQ-6
+    _filteredGas[2] = _gasFilter3.filter((float)analogRead(GAS3_PIN));  // Room 3: MQ-5
+    _filteredGas[3] = _gasFilter4.filter((float)analogRead(GAS4_PIN));  // Room 4: MQ-2 (smoke)
 
     // 2. Flame sensor (active-LOW)
     _flameDetected = (digitalRead(FLAME_PIN) == HIGH);

@@ -136,39 +136,81 @@ def build_alert_caption(state, inside_count, sensor_data, confidence):
     return "\n".join(lines)
 
 
-def draw_system_hud(frame, state, inside_count, esp32_online, mqtt_connected, fps):
-    """HUD overlay: state badge, connectivity, FPS, occupancy."""
+# ==========================================
+# 4-quadrant zonal room mapping (camera-frame)
+# ==========================================
+# NOTE: this room ID is a CAMERA-FRAME quadrant label used only for the live
+# HUD. It is a vision-side spatial cue and is independent of the firmware's
+# physical room->sensor mapping in config.h.
+def draw_quadrants(frame):
+    """Draw a faint gray crosshair that splits the frame into 4 equal quadrants.
+    Returns the (Cx, Cy) midpoint where the lines intersect."""
+    h, w = frame.shape[:2]
+    cx, cy = w // 2, h // 2
+    gray = (160, 160, 160)  # faint gray (BGR)
+    cv2.line(frame, (cx, 0), (cx, h), gray, 1, cv2.LINE_AA)   # vertical divider
+    cv2.line(frame, (0, cy), (w, cy), gray, 1, cv2.LINE_AA)   # horizontal divider
+    return cx, cy
+
+
+def room_from_box(box, cx, cy):
+    """Map a detection bounding-box centroid to a quadrant room ID (1-4).
+    Image coords: y grows downward, so 'bottom' means y >= cy."""
+    x1, y1, x2, y2 = box
+    bx = (int(x1) + int(x2)) // 2
+    by = (int(y1) + int(y2)) // 2
+    if bx < cx and by >= cy:
+        return 1   # bottom-left
+    if bx >= cx and by >= cy:
+        return 2   # bottom-right
+    if bx < cx and by < cy:
+        return 3   # top-left
+    return 4       # top-right
+
+
+def draw_system_hud(frame, state, inside_count, esp32_online, mqtt_connected, fps,
+                    active_rooms=None):
+    """HUD overlay: state badge, connectivity, FPS, occupancy.
+    When active_rooms is non-empty the top-right badge reads 'FIRE - ROOM X[, Y]';
+    otherwise it shows the fused system state (e.g. 'SAFE')."""
     h, w = frame.shape[:2]
 
-    badge_color = {
-        SystemState.SAFE:         (0, 180, 0),
-        SystemState.SENSOR_ALERT: (0, 165, 255),
-        SystemState.FIRE:         (0, 0, 255),
-    }.get(state, (255, 255, 255))
+    # Top-right status string: explicit quadrant room IDs on visual detection.
+    if active_rooms:
+        badge_text = "FIRE - ROOM " + ", ".join(str(r) for r in sorted(active_rooms))
+        badge_color = (0, 0, 255)
+    else:
+        badge_text = state.value
+        badge_color = {
+            SystemState.SAFE:         (0, 180, 0),
+            SystemState.SENSOR_ALERT: (0, 165, 255),
+            SystemState.FIRE:         (0, 0, 255),
+        }.get(state, (255, 255, 255))
+
+    # Dynamic-width badge so long "FIRE - ROOM 1, 2, ..." strings always fit.
+    font, fscale, fthick = cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2
+    (tw, _th), _ = cv2.getTextSize(badge_text, font, fscale, fthick)
+    badge_w = max(250, tw + 24)
+    bx0 = w - badge_w - 10
 
     overlay = frame.copy()
-    cv2.rectangle(overlay, (w - 260, 5), (w - 5, 120), (0, 0, 0), -1)
+    cv2.rectangle(overlay, (bx0 - 5, 5), (w - 5, 120), (0, 0, 0), -1)
     cv2.addWeighted(overlay, 0.6, frame, 0.4, 0, frame)
 
-    cv2.rectangle(frame, (w - 255, 8), (w - 10, 38), badge_color, -1)
-    cv2.putText(frame, f"STATE: {state.value}", (w - 248, 30),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.65, (255, 255, 255), 2)
+    cv2.rectangle(frame, (bx0, 8), (w - 10, 38), badge_color, -1)
+    cv2.putText(frame, badge_text, (bx0 + 8, 30), font, fscale, (255, 255, 255), fthick)
 
     mqtt_text  = "MQTT: CONNECTED" if mqtt_connected else "MQTT: OFFLINE"
     esp_text   = "ESP32: ONLINE" if esp32_online else "ESP32: OFFLINE"
     mqtt_color = (0, 255, 0) if mqtt_connected else (0, 0, 255)
     esp_color  = (0, 255, 0) if esp32_online else (0, 0, 255)
 
-    cv2.putText(frame, mqtt_text, (w - 248, 60),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.45, mqtt_color, 1)
-    cv2.putText(frame, esp_text, (w - 248, 80),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.45, esp_color, 1)
-    cv2.putText(frame, f"FPS: {fps:.1f}", (w - 248, 100),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 1)
+    cv2.putText(frame, mqtt_text, (bx0 + 7, 60), font, 0.45, mqtt_color, 1)
+    cv2.putText(frame, esp_text, (bx0 + 7, 80), font, 0.45, esp_color, 1)
+    cv2.putText(frame, f"FPS: {fps:.1f}", (bx0 + 7, 100), font, 0.45, (255, 255, 255), 1)
 
-    people_color = (0, 255, 0) if inside_count == 0 else (0, 200, 255)
-    cv2.putText(frame, f"People Inside: {inside_count}", (10, h - 20),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.7, people_color, 2)
+    # Bottom-left "People Inside" overlay removed to keep the lower margin clean;
+    # the live occupancy count remains shown top-left by the occupancy tracker.
 
 
 # ==========================================
@@ -260,6 +302,7 @@ def main():
     last_siren_time = 0.0
     last_published_detection = None
     manual_override_prev = False
+    reported_unknown_classes = set()   # zoning diagnostic: log each unknown class once
     fps_timer = time.time()
     fps = 0.0
 
@@ -275,6 +318,10 @@ def main():
 
             frame_count += 1
             now = time.time()
+
+            # Per-frame zonal state: reset the active fire/smoke room set at the
+            # very start of every iteration so it never carries stale rooms over.
+            fire_rooms = set()
 
             if frame_count % 30 == 0:
                 elapsed = now - fps_timer
@@ -302,8 +349,13 @@ def main():
             annotated_frame, inside_count = occupancy.update(frame)
 
             # --- C. Manual override: physical button intercepts the AI loop ---
-            manual_override = bool(sensor_data.get("manual_trigger")) \
-                if (sensor_data := mqtt_client.get_sensor_data()) else False
+            # The ESP32 publishes a top-level "manual_trigger" (1/0) inside the
+            # sffs/sensors/data payload. get_sensor_data() is lock-guarded and
+            # returns the latest cached packet without blocking this loop.
+            # Accept int / bool / string forms defensively.
+            sensor_data = mqtt_client.get_sensor_data()
+            raw_manual = sensor_data.get("manual_trigger") if sensor_data else None
+            manual_override = str(raw_manual).strip().lower() in ("1", "true", "yes")
             if manual_override and not manual_override_prev:
                 logger.warning(
                     "[Manual Override] Manual Button pressed! "
@@ -345,12 +397,42 @@ def main():
                 logger.info("[Alert] Audible siren activated via winsound.")
                 last_siren_time = now
 
-            # --- G. Single final visualization pass: fire boxes + HUD ---
+            # --- G. Single final visualization pass: zoning + fire boxes + HUD ---
+            # Draw the 4-quadrant crosshair, then map every accepted fire/smoke
+            # detection centroid to a quadrant room ID. This population MUST run
+            # before draw_system_hud so the HUD receives the up-to-date room set.
+            cx, cy = draw_quadrants(annotated_frame)
+            for item in fire_result.drawables:
+                # Defensive unpack: tolerate extra trailing fields (e.g. a track
+                # ID) so a drawable-structure desync can never break zoning.
+                try:
+                    box, class_name, conf = item[0], item[1], float(item[2])
+                except (TypeError, IndexError, ValueError):
+                    print(f"[ZONING][WARN] Unrecognized drawable structure -> {item!r}")
+                    continue
+
+                name = str(class_name).lower()
+                is_fire = "fire" in name
+                is_smoke = "smoke" in name
+
+                if (is_fire and conf >= fire_detector.min_confidence) or \
+                   (is_smoke and conf >= fire_detector.smoke_confidence):
+                    fire_rooms.add(room_from_box(box, cx, cy))
+                elif not (is_fire or is_smoke):
+                    # The box class is neither fire nor smoke: dump it ONCE per run
+                    # so the exact data format can be diagnosed without flooding.
+                    if name not in reported_unknown_classes:
+                        reported_unknown_classes.add(name)
+                        print(f"[ZONING][WARN] Unmapped detection class={class_name!r} "
+                              f"conf={conf:.2f} box={list(map(int, box))}")
+
             fire_detector.draw(annotated_frame, fire_result)
+            # Pass the populated active-room set explicitly into the HUD.
             draw_system_hud(
                 annotated_frame, state=state, inside_count=inside_count,
                 esp32_online=mqtt_client.is_esp32_online(),
                 mqtt_connected=mqtt_client.is_connected(), fps=fps,
+                active_rooms=fire_rooms,
             )
 
             cv2.imshow("SFFS - Smart Fire Fighting System", annotated_frame)

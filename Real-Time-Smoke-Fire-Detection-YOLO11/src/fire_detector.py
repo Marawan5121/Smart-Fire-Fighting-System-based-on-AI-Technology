@@ -179,10 +179,11 @@ class Detector:
     # Visualization (single final pass)
     # ------------------------------------------------------------------
     def draw(self, frame: np.ndarray, result: FireResult) -> None:
-        """Render all detection boxes and the status bar onto `frame` in place."""
+        """Render all detection boxes onto `frame` in place.
+        The bottom status bar (Status / Conf / IoU) is intentionally omitted to
+        keep the lower frame margin completely clean."""
         for box, class_name, conf in result.drawables:
             self._draw_box(frame, box, class_name, conf)
-        self._add_frame_info(frame, result.label)
 
     def _draw_box(self, frame, box, class_name, confidence) -> None:
         x1, y1, x2, y2 = box

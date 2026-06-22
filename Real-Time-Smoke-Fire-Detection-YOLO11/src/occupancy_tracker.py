@@ -190,7 +190,7 @@ class OccupancyTracker:
         cv2.line(frame, (self.line_x, 0), (self.line_x, h), (0, 0, 255), 2)
         cv2.putText(frame, "OUTSIDE", (self.line_x - 120, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
         cv2.putText(frame, "INSIDE", (self.line_x + 20, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-        cv2.putText(frame, f"Inside: {self.inside_count}", (50, 50), cv2.FONT_HERSHEY_SIMPLEX, 1.2, (255, 255, 255), 3)
+        cv2.putText(frame, f"Inside: {self.inside_count}", (50, 50), cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 0, 0), 3)  # Black for legibility on bright feeds
 
     def get_count(self):
         return self.inside_count
